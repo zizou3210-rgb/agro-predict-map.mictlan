@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI AgroPredictMap</title>
+    <meta name="theme-color" content="#243a40" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="AI AgroPredictMap" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icons/icon_mictlan.png" type="image/png" />
+    <link rel="apple-touch-icon" href="./icons/icon_mictlan.png" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/choices.js@11.1.0/public/assets/styles/base.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/choices.js@11.1.0/public/assets/styles/choices.min.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260706x" />
+  </head>
+  <body>
+    <main class="layout">
+      <section class="hero">
+        <div class="hero-actions">
+          <button class="hero-action-button hero-action-danger" id="cancel-all-button" type="button" aria-label="Cancel running processes" title="Cancel running processes">
+            <span aria-hidden="true">✕</span>
+          </button>
+          <button class="hero-action-button hero-action-button-new" id="new-workspace-button" type="button" aria-label="Start new workspace" title="Start new workspace">
+            <span aria-hidden="true">＋</span>
+          </button>
+          <button class="hero-action-button" id="refresh-app-button" type="button" aria-label="Refresh app" title="Refresh app">
+            <span aria-hidden="true">↻</span>
+          </button>
+          <button class="hero-action-button" id="settings-button" type="button" aria-label="Settings" title="Settings">
+            <span aria-hidden="true">⚙</span>
+          </button>
+        </div>
+        <p class="eyebrow">Agricultural Intelligence Platform</p>
+        <div class="build-badge" id="build-badge">M I C T L A N</div>
+        <h1><span class="hero-ai-mark">AI</span> AgroPredictMap <span class="hero-build-inline" id="hero-build-inline">Apanohuayan 1.0.0</span></h1>
+        <p class="intro">
+          A professional geospatial workspace for agricultural data processing,
+          user-defined target prediction, and interactive field-level exploration.
+        </p>
+        <input id="xlsx-file" type="file" accept=".xlsx" hidden />
+        <div class="loading-panel" id="loading-panel" hidden>
+          <div class="loading-bar">
+            <div class="loading-bar-fill" id="loading-bar-fill"></div>
+          </div>
+          <div class="loading-meta">
+            <strong id="loading-stage">Waiting for file</strong>
+            <span id="loading-percent">0%</span>
+          </div>
+          <p id="loading-message">Upload a file to start processing.</p>
+        </div>
+      </section>
+
+      <section class="selection-properties-panel" id="selection-properties-panel" hidden>
+        <div class="selection-properties-card selection-properties-shell">
+          <div class="selection-properties-shell-head">
+            <h2>Building WorkSpace</h2>
+          </div>
+          <div class="selection-properties-collapsed" id="selection-properties-collapsed" hidden>
+            <span class="selection-properties-collapsed-copy" id="selection-properties-collapsed-copy">Summary execution completed.</span>
+            <button class="selection-properties-restore" id="selection-properties-restore" type="button" aria-label="Show building workspace" title="Show building workspace"><span class="selection-properties-toggle-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm0 2v14h10V5H7zm2 3h6v2H9V8zm0 4h6v2H9v-2z"/></svg></span></button>
+          </div>
+          <div class="selection-properties-stepper-wrap">
+            <div class="selection-properties-stepper" id="selection-properties-stepper">
+              <article class="selection-step selection-step-active" data-step-key="initial" title="Choose the target variable, dates, and map the latitude and longitude columns.">
+                <span class="selection-step-index">1</span>
+                <div class="selection-step-copy">
+                  <h2>Initial Settings</h2>
+                </div>
+              </article>
+              <article class="selection-step selection-step-pending" data-step-key="select-columns" title="Choose the germplasm identifier columns, enable only the remaining fields you want to keep, and classify each one before continuing.">
+                <span class="selection-step-index">2</span>
+                <div class="selection-step-copy">
+                  <h2>Select Columns</h2>
+                </div>
+              </article>
+              <article class="selection-step selection-step-pending" data-step-key="summary" title="Validate the initial settings and selected column groups before continuing.">
+                <span class="selection-step-index">3</span>
+                <div class="selection-step-copy">
+                  <h2>Summary</h2>
+                </div>
+              </article>
+            </div>
+            <button class="selection-properties-restore selection-properties-hide" id="selection-properties-hide" type="button" hidden aria-label="Hide building workspace" title="Hide building workspace"><span class="selection-properties-toggle-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M5 11h14v2H5z"/></svg></span></button>
+          </div>
+          <div class="selection-properties-card selection-properties-card-highlight" id="selection-initial-settings-card">
+            <div class="selection-properties-header">
+              <div class="selection-properties-header-main">
+                <h2>Initial Settings</h2>
+                <div class="selection-workspace-grid">
+                  <div class="selection-workspace-name-block">
+                    <label class="selection-field-label" for="selection-workspace-name">Workspace Name</label>
+                    <input id="selection-workspace-name" class="selection-workspace-name-input" type="text" placeholder="Enter workspace name" maxlength="250" />
+                  </div>
+                  <div class="selection-workspace-upload-cell">
+                    <button class="upload-button secondary selection-properties-upload-button" id="selection-properties-upload-trigger" type="button" aria-label="Load workbook" title="Load workbook"><span class="selection-upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M12 3l4.5 4.5-1.4 1.4-2.1-2.1V16h-2V6.8L8.9 8.9 7.5 7.5 12 3zm-7 11h2v4h10v-4h2v6H5v-6z"/></svg></span></button>
+                  </div>
+                </div>
+                <p class="selection-properties-file-name" id="selection-properties-file-name">No file selected</p>
+              </div>
+              <div class="selection-properties-badge" id="selection-properties-badge">Waiting for file</div>
+            </div>
+          <div class="selection-properties-grid selection-properties-grid-balanced">
+            <div class="selection-field">
+              <label class="selection-field-label" for="selection-target-variable">Selection of target variable <span class="selection-field-required">Required</span></label>
+              <div class="selection-field-control selection-field-control-single">
+                <select id="selection-target-variable" class="selection-listbox" disabled>
+                  <option value="">Upload a workbook first</option>
+                </select>
+              </div>
+            </div>
+            <div class="selection-field">
+              <label class="selection-field-label" for="selection-longitude-column">Selection of longitude column <span class="selection-field-required">Required</span></label>
+              <div class="selection-field-control">
+                <select id="selection-longitude-column" class="selection-listbox" disabled>
+                  <option value="">Select target variable first</option>
+                </select>
+              </div>
+            </div>
+            <div class="selection-field">
+              <label class="selection-field-label" for="selection-latitude-column">Selection of latitude column <span class="selection-field-required">Required</span></label>
+              <div class="selection-field-control">
+                <select id="selection-latitude-column" class="selection-listbox" disabled>
+                  <option value="">Select target variable first</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="selection-properties-grid selection-properties-grid-secondary">
+            <div class="selection-field selection-field-date">
+              <label class="selection-field-label" for="selection-planting-date-column">Date of Plating <span class="selection-field-required">Required</span></label>
+              <div class="selection-field-control">
+                <select id="selection-planting-date-column" class="selection-listbox" disabled>
+                  <option value="">Select target variable first</option>
+                </select>
+              </div>
+            </div>
+            <div class="selection-field selection-field-date">
+              <label class="selection-field-label" for="selection-harvesting-date-column">Date of Harvesting <span class="selection-field-required">Required</span></label>
+              <div class="selection-field-control">
+                <select id="selection-harvesting-date-column" class="selection-listbox" disabled>
+                  <option value="">Select target variable first</option>
+                </select>
+              </div>
+            </div>
+            <div class="selection-field selection-field-soil">
+              <label class="selection-field-label" for="selection-soil-texture-column">Soil type/texture <span class="selection-field-required">Required</span></label>
+              <div class="selection-field-control">
+                <select id="selection-soil-texture-column" class="selection-listbox" disabled>
+                  <option value="">Select target variable first</option>
+                </select>
+              </div>
+            </div>
+            <div class="selection-field selection-field-soil">
+              <label class="selection-field-label" for="selection-soil-depth-column">Soil Depth (cm) <span class="selection-field-required">Required</span></label>
+              <div class="selection-field-control">
+                <select id="selection-soil-depth-column" class="selection-listbox" disabled>
+                  <option value="">Select target variable first</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="selection-properties-actions-row">
+            <button class="selection-step-cta" id="selection-step-next-button" type="button" hidden aria-label="Go to Select Columns" title="Go to Select Columns">
+              <span class="selection-step-cta-arrow" aria-hidden="true">→</span>
+            </button>
+          </div>
+        </div>
+        <div class="selection-properties-workbench">
+          <article class="selection-properties-card" id="selection-select-columns-card">
+            <div class="selection-properties-card-head">
+              <div>
+                <p class="launcher-kicker">Step 2</p>
+                <h3>Columns Configuration <span class="selection-help-badge" title="Step 2 lets you confirm the germplasm identifier columns first, then review the remaining columns, exclude any field you do not want, and classify the rest as Categorical, Quantitative, or No Defined.">?</span></h3>
+              </div>
+              <span class="selection-pill" id="selection-select-columns-count">3 panels</span>
+            </div>
+            <div class="selection-step-two-panels">
+              <section class="selection-step-two-panel" id="selection-identifiers-panel">
+                <h3>Identifiers <span class="selection-help-badge" title="Select the fields that identify each germplasm record. Use the confirm button when the identifier set is ready, because that unlocks the next panel with the remaining columns.">?</span></h3>
+                <div id="selection-select-columns-root"></div>
+              </section>
+              <section class="selection-step-two-panel" id="selection-categorical-card" hidden>
+                <h3>Attributes <span class="selection-help-badge" title="Review the remaining columns after Identifiers. Keep only the fields you want to include and assign each one to Categorical, Quantitative, or No Defined.">?</span></h3>
+                <div id="selection-categorical-root"></div>
+              </section>
+              <section class="selection-step-two-panel" id="selection-quantitative-card" hidden>
+                <h3>Quantitative Data</h3>
+                <div id="selection-quantitative-root"></div>
+              </section>
+            </div>
+            <div class="selection-step-next-row">
+              <button class="selection-step-cta" id="selection-summary-next-button" type="button" hidden aria-label="Go to Summary" title="Go to Summary">
+                <span class="selection-step-cta-arrow" aria-hidden="true">→</span>
+              </button>
+            </div>
+          </article>
+        </div>
+        <div class="selection-properties-workbench">
+          <article class="selection-properties-card" id="selection-summary-card" hidden>
+            <div class="selection-properties-card-head">
+              <div>
+                <p class="launcher-kicker">Step 3</p>
+                <h3>Summary</h3>
+              </div>
+              <span class="selection-pill" id="selection-summary-badge">Pending</span>
+            </div>
+            <div id="selection-summary-root"></div>
+          </article>
+        </div>
+        </div>
+      </section>
+      <section class="map-card">
+        <div class="data-view-tabs">
+          <button class="data-view-tab active" id="data-view-tab-original" type="button">
+            Original Data
+          </button>
+          <button class="data-view-tab" id="data-view-tab-training" type="button">
+            Training
+          </button>
+          <button class="data-view-tab" id="data-view-tab-top-germplasm" type="button" hidden>
+            Top Germplasm
+          </button>
+          <button class="data-view-tab" id="data-view-tab-prediction" type="button">
+            High-Potential Sites
+          </button>
+        </div>
+        <div class="forecast-dates-panel top-germplasm-panel" id="top-germplasm-panel" hidden aria-hidden="true">
+          <div class="top-germplasm-hero">
+            <div class="top-germplasm-hero-copy">
+              <p class="launcher-kicker">Top Germplasm</p>
+              <h3>AI-ranked germplasm candidates for the active target</h3>
+              <p class="forecast-dates-copy">
+                This workspace view uses AI-driven modeling to identify the germplasms with the strongest expected performance for the current target defined by the user. To make that ranking more agronomically robust, the app reconstructs the recent environmental context of each germplasm by downloading climate raster information across the same phenological windows for the previous 5 years and by enriching every record with soil data before applying the workspace model.
+              </p>
+              <p class="forecast-dates-copy top-germplasm-hero-note">
+                The map emphasizes the highest-potential candidates, while the download preserves the full prediction set used to generate this analysis.
+              </p>
+            </div>
+            <div class="top-germplasm-hero-metrics" aria-hidden="true">
+              <div class="top-germplasm-metric-card">
+                <strong>AI Model</strong>
+                <span>Workspace-specific ranking</span>
+              </div>
+              <div class="top-germplasm-metric-card">
+                <strong>Climate Raster</strong>
+                <span>5-year phenological context</span>
+              </div>
+              <div class="top-germplasm-metric-card">
+                <strong>Soil Context</strong>
+                <span>Field-level enrichment layer</span>
+              </div>
+            </div>
+          </div>
+          <div class="preprocess-validation-actions top-germplasm-actions">
+            <a class="upload-button secondary" id="top-germplasm-download" href="#" download>Download Germplasm</a>
+          </div>
+          <section class="top-germplasm-preview" id="top-germplasm-preview" hidden>
+            <div class="top-germplasm-preview-head">
+              <strong>Top Germplasm Preview</strong>
+              <span id="top-germplasm-preview-status">Showing top 10 rows</span>
+            </div>
+            <div class="top-germplasm-preview-table-wrap">
+              <table class="top-germplasm-preview-table" id="top-germplasm-preview-table"></table>
+            </div>
+            <div class="top-germplasm-preview-slider-wrap" id="top-germplasm-preview-slider-wrap" hidden>
+              <input id="top-germplasm-preview-slider" type="range" min="0" max="0" step="1" value="0" />
+            </div>
+          </section>
+        </div>
+        <div class="prediction-controls-panel" id="prediction-controls-panel" hidden>
+          <div class="prediction-controls-header">
+            <div>
+              <p class="launcher-kicker">High-Potential Sites</p>
+              <p class="prediction-controls-copy">
+                Use the workspace model, define the bounding box and forecast dates, then load the workbook you want to evaluate.
+              </p>
+            </div>
+            <button class="prediction-controls-clear" id="prediction-controls-clear" type="button">Clear</button>
+          </div>
+          <label class="model-select-group" for="saved-model-select">
+            <span class="model-select-label">Model</span>
+            <select id="saved-model-select" class="model-select-listbox">
+              <option value="">Workspace model</option>
+            </select>
+            <span class="model-select-help" id="saved-model-help">
+              Loading saved models...
+            </span>
+          </label>
+          <label class="model-select-group" id="climate-scope-group" for="climate-scope-select" hidden style="display: none">
+            <span class="model-select-label">Climate Scope</span>
+            <select id="climate-scope-select" class="model-select-listbox">
+              <option value="regional_manual">Manual bounding box climate grid</option>
+            </select>
+            <span class="model-select-help" id="climate-scope-help">
+              High-Potential Sites uses the Manual bounding box climate grid workflow for the current workspace model.
+            </span>
+          </label>
+          <div class="forecast-dates-panel" id="regional-country-panel" hidden>
+            <p class="launcher-kicker">Country Localities</p>
+            <p class="forecast-dates-copy">
+              Choose an African country in English. The app will load its localities, create a new row per locality and original germplasm record, and use those locality coordinates to query the climate raster provider.
+            </p>
+            <div class="forecast-dates-grid">
+              <label class="forecast-date-field" for="regional-country-select">
+                <span>Country</span>
+                <select id="regional-country-select" class="model-select-listbox">
+                  <option value="">Loading countries...</option>
+                </select>
+              </label>
+            </div>
+            <div class="regional-country-preview" id="regional-country-preview">
+              Loading African countries...
+            </div>
+          </div>
+          <div class="forecast-dates-panel" id="regional-manual-panel" hidden>
+            <p class="launcher-kicker">Manual Regional Bounds</p>
+            <p class="forecast-dates-copy">
+              Define a manual bounding box over Africa. The app will generate a climate grid inside the box, take the centroid of each cell, create one prediction point per centroid and original germplasm row, and use those centroid coordinates for climate raster extraction.
+            </p>
+            <div class="regional-manual-map-actions">
+              <button id="regional-bounds-draw-map" type="button">Select Bounding Box On Map</button>
+              <button id="regional-bounds-clear-map" type="button">Clear Map Box</button>
+            </div>
+            <p class="regional-manual-map-help" id="regional-manual-map-help">
+              Start map selection, then drag directly on the map to define the bounding box.
+            </p>
+            <div class="forecast-dates-grid">
+              <label class="forecast-date-field" for="regional-bounds-latitude-min">
+                <span>Latitude min</span>
+                <input id="regional-bounds-latitude-min" type="number" step="0.000001" placeholder="-5.5" />
+              </label>
+              <label class="forecast-date-field" for="regional-bounds-latitude-max">
+                <span>Latitude max</span>
+                <input id="regional-bounds-latitude-max" type="number" step="0.000001" placeholder="5.5" />
+              </label>
+              <label class="forecast-date-field" for="regional-bounds-longitude-min">
+                <span>Longitude min</span>
+                <input id="regional-bounds-longitude-min" type="number" step="0.000001" placeholder="33.0" />
+              </label>
+              <label class="forecast-date-field" for="regional-bounds-longitude-max">
+                <span>Longitude max</span>
+                <input id="regional-bounds-longitude-max" type="number" step="0.000001" placeholder="42.5" />
+              </label>
+            </div>
+            <div class="regional-country-preview" id="regional-manual-preview">
+              Enter latitude and longitude bounds to preview the climate grid inside the bounding box.
+            </div>
+          </div>
+          <div class="forecast-dates-panel" id="forecast-dates-panel" hidden>
+            <p class="launcher-kicker">Forecast Dates</p>
+            <p class="forecast-dates-copy">
+              When you reuse a saved model, choose the planting and harvesting dates. The preprocess climate stage will build climate windows using these dates and the 5-year backward average.
+            </p>
+            <div class="forecast-dates-grid">
+              <label class="forecast-date-field" for="forecast-planting-date">
+                <span>Date of planting</span>
+                <input id="forecast-planting-date" type="date" />
+              </label>
+              <label class="forecast-date-field" for="forecast-harvesting-date">
+                <span>Date_of_harvesting</span>
+                <input id="forecast-harvesting-date" type="date" />
+              </label>
+            </div>
+          </div>
+          <div class="forecast-dates-panel prediction-point-upload-panel" id="prediction-point-upload-panel" hidden>
+            <p class="launcher-kicker">Workbook Upload</p>
+            <p class="forecast-dates-copy" id="prediction-point-upload-copy">
+              Load the workbook you want to evaluate with the workspace model after defining the bounding box and the forecast dates.
+            </p>
+            <div class="prediction-point-upload-actions">
+              <button
+                class="secondary-button"
+                id="prediction-point-original-button"
+                type="button"
+              >
+                Explor Original Data
+              </button>
+              <button
+                class="secondary-button"
+                id="prediction-point-upload-button"
+                type="button"
+              >
+                Load Data to Predict
+              </button>
+            </div>
+          </div>
+          <div class="forecast-dates-panel" id="germplasm-selection-panel" hidden>
+            <p class="launcher-kicker" id="germplasm-selection-title"></p>
+            <p class="forecast-dates-copy">
+              After loading the workbook, choose one distinct germplasm name from the file. Once the bounding box, forecast dates, workbook, and germplasm selection are ready, you can run High-Potential Sites for that selected germplasm.
+            </p>
+            <div class="germplasm-selection-toolbar">
+              <div class="germplasm-selection-count" id="germplasm-selection-count">0 selected</div>
+              <div class="germplasm-selection-actions" hidden>
+                <button id="germplasm-select-all" type="button">Select All</button>
+                <button id="germplasm-clear-all" type="button">Clear All</button>
+              </div>
+              <label class="germplasm-selection-id-picker" id="germplasm-selection-id-picker" hidden for="germplasm-selection-id-select">
+                <span class="germplasm-selection-id-picker-label">Select Column Id</span>
+                <div class="selection-field-control selection-field-control-single">
+                  <select id="germplasm-selection-id-select" class="selection-listbox" disabled>
+                    <option value="">No fields available</option>
+                  </select>
+                </div>
+              </label>
+            </div>
+            <div class="germplasm-selection-list" id="germplasm-selection-list"></div>
+            <div class="germplasm-selection-footer">
+              <span class="model-select-help" id="germplasm-selection-help">
+                Load an Excel file to preview distinct germplasm names for High-Potential Sites.
+              </span>
+              <button id="execute-germplasm-selection" type="button">Run</button>
+            </div>
+          </div>
+          <div class="preprocess-validation-panel" id="preprocess-validation-panel" hidden>
+            <p class="launcher-kicker">Preprocess Validation</p>
+            <p id="preprocess-validation-message">
+              The preprocess output is ready. Download the phase06 workbook, validate it, and continue when approved.
+            </p>
+            <div class="preprocess-validation-actions">
+              <a class="upload-button secondary" id="download-preprocess-output" href="#" download>Download Preprocess Output</a>
+              <button id="continue-after-preprocess" type="button">Continue With Selected Model</button>
+            </div>
+          </div>
+          <div class="preprocess-validation-panel" id="training-result-download-panel" hidden>
+            <p class="launcher-kicker">Dev Training Download</p>
+            <p id="training-result-download-message">
+              Download the training prediction workbook generated for the map shown in Training.
+            </p>
+            <div class="preprocess-validation-actions">
+              <a class="upload-button secondary" id="download-training-results" href="#" download>Download Training Results</a>
+            </div>
+          </div>
+        </div>
+        <div class="prediction-loading-slot" id="prediction-loading-slot" hidden></div>
+        <div class="summary-panel">
+          <div class="summary-header">
+            <p class="launcher-kicker">Geo Information Summary</p>
+          </div>
+          <div class="summary-tabs">
+            <button class="summary-tab active" id="summary-tab-countries" type="button">Countries</button>
+            <button class="summary-tab" id="summary-tab-stats" type="button">Metrics</button>
+            <button class="summary-tab" id="summary-tab-log" type="button">Log</button>
+          </div>
+          <div class="summary-tab-panel" id="summary-panel-countries">
+            <div class="country-summary" id="country-summary"></div>
+          </div>
+          <div class="summary-tab-panel" id="summary-panel-stats" hidden>
+            <div class="stats" id="stats"></div>
+          </div>
+          <div class="summary-tab-panel" id="summary-panel-log" hidden>
+            <div class="summary-log" id="summary-log"></div>
+          </div>
+        </div>
+
+        <div class="map-header">
+          <div>
+            <h2>Spatial Distribution</h2>
+            <p>
+              Use zoom, drag, and Geocoordinates selection to explore records and their attributes.
+            </p>
+          </div>
+          <div class="prediction-mean-banner" id="prediction-mean-banner" hidden>
+            <h2>Grain Yield Prediction Mean</h2>
+            <p id="prediction-mean-banner-value">--</p>
+          </div>
+          <div class="training-metric" id="training-metric" hidden>
+            <span class="training-metric-label">Mean Absolute Error</span>
+            <strong class="training-metric-value" id="training-metric-value">--</strong>
+          </div>
+          <div class="legend">
+            <span class="legend-dot" id="legend-dot"></span>
+            <span id="legend-label">Predicted Grain Yield</span>
+          </div>
+        </div>
+
+        <div class="map-shell">
+          <div class="map-frame map-frame-disabled" id="map-frame">
+            <div class="map-controls" id="map-controls" aria-label="Map controls">
+              <div class="map-controls-group map-controls-group-zoom" aria-label="Map controls">
+                <button class="map-control-button" id="map-screenshot" type="button" aria-label="Download map screenshot" title="Download map screenshot">
+                  <span class="map-control-icon map-control-icon-camera" aria-hidden="true">
+                    <svg class="map-control-svg" viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                      <path d="M8 7l1.3-2h5.4L16 7h2a2 2 0 0 1 2 2v7.5A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5V9a2 2 0 0 1 2-2h2zm4 2.2A4.3 4.3 0 1 0 16.3 13 4.3 4.3 0 0 0 12 9.2zm0 2A2.3 2.3 0 1 1 9.7 13 2.3 2.3 0 0 1 12 11.2z" fill="currentColor"/>
+                    </svg>
+                  </span>
+                </button>
+                <button class="map-control-button" id="map-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">
+                  <span class="map-control-icon map-control-icon-plus" aria-hidden="true">
+                    <span class="map-control-line map-control-line-horizontal"></span>
+                    <span class="map-control-line map-control-line-vertical"></span>
+                  </span>
+                </button>
+                <button class="map-control-button" id="map-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">
+                  <span class="map-control-icon map-control-icon-minus" aria-hidden="true">
+                    <span class="map-control-line map-control-line-horizontal"></span>
+                  </span>
+                </button>
+                <button class="map-control-button" id="map-toggle-expand" type="button" aria-label="Maximize map" title="Maximize map">
+                  <span class="map-control-icon map-control-icon-expand" aria-hidden="true">
+                    <svg class="map-control-svg map-control-svg-expand" viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                      <path d="M8 4H4v4M16 4h4v4M20 16v4h-4M8 20H4v-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <svg class="map-control-svg map-control-svg-restore" viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                      <path d="M9 4H5v4M15 4h4v4M19 15v4h-4M9 19H5v-4M9 9h6v6H9z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </span>
+                </button>
+              </div>
+            </div>
+            <div class="tiles" id="tiles" aria-hidden="true"></div>
+            <svg id="map" viewBox="0 0 1000 680" role="img" aria-label="Geospatial map"></svg>
+            <aside class="tooltip" id="tooltip" hidden></aside>
+          </div>
+
+          <aside class="details-panel" id="details-panel">
+            <div class="color-help-panel" id="color-help-panel" hidden>
+              <div class="color-help-list" id="color-help-list"></div>
+              <div class="color-help-scale" id="color-help-scale" hidden aria-hidden="true">
+                <span class="color-help-scale-track">
+                  <span class="color-help-scale-bar"></span>
+                  <span class="color-help-scale-marker" style="left: 25%;">
+                    <span class="color-help-scale-marker-label">Q1</span>
+                  </span>
+                  <span class="color-help-scale-marker" style="left: 50%;">
+                    <span class="color-help-scale-marker-label">Median</span>
+                  </span>
+                  <span class="color-help-scale-marker" style="left: 75%;">
+                    <span class="color-help-scale-marker-label">Q2</span>
+                  </span>
+                </span>
+              </div>
+            </div>
+            <div class="details-header">
+              <p class="details-kicker">Record Details</p>
+              <h3 id="details-title">Experiment Information</h3>
+              <p id="details-subtitle">
+                Click a point to view Excel attributes in groups of 10.
+              </p>
+            </div>
+
+            <div class="details-tabs">
+              <button class="details-tab active" id="tab-germplasm" type="button">Germplasm</button>
+              <button class="details-tab" id="tab-attributes" type="button">Attributes</button>
+              <button class="details-tab" id="tab-geo" type="button">Geo-Information</button>
+            </div>
+
+            <div class="details-tab-panel" id="panel-germplasm">
+              <div class="details-list" id="germplasm-list"></div>
+            </div>
+
+            <div class="details-tab-panel" id="panel-attributes" hidden>
+              <div class="details-list" id="details-list"></div>
+              <div class="details-nav">
+                <button id="prev-page" type="button">Previous</button>
+                <span id="page-indicator">0 / 0</span>
+                <button id="next-page" type="button">Next</button>
+              </div>
+            </div>
+
+            <div class="details-tab-panel" id="panel-geo" hidden>
+              <div class="details-meta" id="details-meta"></div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="model-panel">
+        <div class="model-panel-header">
+          <div>
+            <p class="launcher-kicker">FeatureHero Model Registry</p>
+            <h2>WorkSpaces Saved</h2>
+            <p class="model-panel-copy">
+              Saved workspaces are stored in
+              <code>cimmyt_app/pipeline/model</code> and can be loaded again with their full Original Data and Training context.
+            </p>
+          </div>
+          <div class="model-count" id="model-count">Checking models...</div>
+        </div>
+        <div class="model-scroll-tools">
+          <button class="model-scroll-button" id="model-scroll-prev" type="button" aria-label="Scroll models left">
+            ◀
+          </button>
+          <button class="model-scroll-button" id="model-scroll-next" type="button" aria-label="Scroll models right">
+            ▶
+          </button>
+        </div>
+        <div class="model-empty" id="model-empty">
+          No workspaces have been saved yet.
+        </div>
+        <div class="model-scroller" id="model-scroller">
+          <div class="model-list" id="model-list"></div>
+        </div>
+      </section>
+
+      <section class="launcher-panel">
+        <div>
+          <p class="launcher-kicker">Cross-Platform Launcher</p>
+          <p id="launcher-status">
+            Preparing standalone installation support for Windows, Linux, and iOS.
+          </p>
+          <p id="ios-install-hint" hidden>
+            On iPhone or iPad, open this app in Safari and use Share > Add to Home Screen.
+          </p>
+        </div>
+        <button id="install-app" type="button" hidden>Install App</button>
+      </section>
+    </main>
+
+    <div class="model-modal" id="model-modal" hidden inert aria-hidden="true">
+      <div class="model-modal-backdrop" id="model-modal-backdrop"></div>
+      <section class="model-modal-card" id="model-modal-card" aria-labelledby="model-modal-title">
+        <div class="model-modal-header">
+          <div>
+            <p class="launcher-kicker">Workspace Model Details</p>
+            <h3 id="model-modal-title">Model details</h3>
+          </div>
+          <button class="model-modal-close" id="model-modal-close" type="button" aria-label="Close details">
+            ×
+          </button>
+        </div>
+        <p class="model-modal-description" id="model-modal-description"></p>
+        <div class="model-modal-grid" id="model-modal-grid"></div>
+        <div class="model-modal-section">
+          <h4>Machines</h4>
+          <div class="model-modal-tags" id="model-modal-machines"></div>
+        </div>
+        <div class="model-modal-section">
+          <h4>Downloads</h4>
+          <div class="model-downloads" id="model-modal-downloads"></div>
+        </div>
+        <div class="model-modal-actions">
+          <button class="model-delete-button" id="model-delete-button" type="button">Delete model</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="model-name-modal" id="model-name-modal" hidden inert aria-hidden="true">
+      <div class="model-name-modal-backdrop" id="model-name-modal-backdrop"></div>
+      <section class="model-name-modal-card" id="model-name-modal-card" aria-labelledby="model-name-modal-title">
+        <div class="model-modal-header">
+          <div>
+            <p class="launcher-kicker">Model Name</p>
+            <h3 id="model-name-modal-title">Save the generated model</h3>
+          </div>
+          <button class="model-modal-close" id="model-name-modal-close" type="button" aria-label="Close model name dialog">
+            ×
+          </button>
+        </div>
+        <p class="model-modal-description" id="model-name-modal-description">
+          Enter a model name. The system will preserve the model id and creation date for tracking.
+        </p>
+        <label class="model-name-field" for="model-name-input">
+          <span>Model name</span>
+          <input id="model-name-input" type="text" maxlength="120" placeholder="Example: Kenya April Yield Model" />
+        </label>
+        <p class="model-name-meta" id="model-name-modal-meta"></p>
+        <div class="model-name-modal-actions">
+          <button class="upload-button secondary" id="model-name-modal-later" type="button">Later</button>
+          <button class="upload-button" id="model-name-modal-save" type="button">Save Model Name</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="model-name-modal prediction-download-modal" id="prediction-download-modal" hidden inert aria-hidden="true">
+      <div class="model-name-modal-backdrop" id="prediction-download-modal-backdrop"></div>
+      <section class="model-name-modal-card prediction-download-modal-card" id="prediction-download-modal-card" aria-labelledby="prediction-download-modal-title">
+        <div class="model-modal-header">
+          <div>
+            <p class="launcher-kicker">High-Potential Sites</p>
+            <h3 id="prediction-download-modal-title">Name the prediction file</h3>
+          </div>
+          <button class="model-modal-close" id="prediction-download-modal-close" type="button" aria-label="Close prediction download dialog">
+            ×
+          </button>
+        </div>
+        <p class="model-modal-description" id="prediction-download-modal-description">
+          Enter the file name to download the prediction results.
+        </p>
+        <label class="model-name-field prediction-download-field" for="prediction-download-name-input">
+          <span>File name</span>
+          <div class="prediction-download-input-wrap">
+            <input id="prediction-download-name-input" type="text" maxlength="160" placeholder="Example: kenya_prediction_results" />
+            <span class="prediction-download-extension" id="prediction-download-extension">.xlsx</span>
+          </div>
+        </label>
+        <p class="model-name-meta prediction-download-meta" id="prediction-download-modal-meta"></p>
+        <div class="model-name-modal-actions prediction-download-actions">
+          <button class="upload-button secondary" id="prediction-download-modal-cancel" type="button">Cancel</button>
+          <button class="upload-button" id="prediction-download-modal-save" type="button">Download File</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="settings-modal" id="settings-modal" hidden inert aria-hidden="true">
+      <div class="model-name-modal-backdrop" id="settings-modal-backdrop"></div>
+      <section class="settings-modal-card" id="settings-modal-card" aria-labelledby="settings-modal-title">
+        <div class="model-modal-header">
+          <div>
+            <p class="launcher-kicker">Application Settings</p>
+            <h3 id="settings-modal-title">Genetic Algorithm (FH)</h3>
+          </div>
+          <button class="model-modal-close" id="settings-modal-close" type="button" aria-label="Close settings dialog">
+            ×
+          </button>
+        </div>
+        <p class="model-modal-description">
+          Configure the FeatureHero parameters and the climate grid precision used for manual bounding-box runs. The remaining application variables will continue to be managed through <code>cimmyt_app/.env</code>.
+        </p>
+        <div class="settings-form-grid">
+          <label class="forecast-date-field" for="settings-featurehero-generation">
+            <span>Number Generation</span>
+            <input id="settings-featurehero-generation" type="number" min="10" max="200" step="1" />
+            <small>Recommended default: 200 generations.</small>
+          </label>
+          <label class="forecast-date-field" for="settings-featurehero-population">
+            <span>Number Population</span>
+            <input id="settings-featurehero-population" type="number" min="10" max="200" step="10" />
+            <small>Recommended default: 120 populations.</small>
+          </label>
+          <label class="forecast-date-field settings-wide-field" for="settings-featurehero-machines">
+            <span>Machines</span>
+            <select id="settings-featurehero-machines">
+              <option value="extreme_gradient_boost_regression" selected>Extreme Gradient Boost Regression</option>
+              <option value="random_forest_regression">Random Forest Regression</option>
+              <option value="lasso_regression">Lasso Regression</option>
+              <option value="support_vector_regression">Support Vector Regression</option>
+            </select>
+          </label>
+          <label class="forecast-date-field settings-wide-field" for="settings-featurehero-metric">
+            <span>Metric</span>
+            <select id="settings-featurehero-metric">
+              <option value="mean_absolute_error">Mean Absolute Error</option>
+              <option value="root_mean_squared_error">Root Mean Squared Error</option>
+            </select>
+          </label>
+          <label class="forecast-date-field settings-wide-field" for="settings-nasa-resolution">
+            <span>Climate Grid Precision</span>
+            <input id="settings-nasa-resolution" type="number" min="1" max="10" step="1" value="5" />
+            <small>Value in kilometers (km).</small>
+            <small>Used when generating the climate grid inside a manual bounding box.</small>
+          </label>
+        </div>
+        <p class="settings-modal-status" id="settings-modal-status"></p>
+        <div class="model-name-modal-actions">
+          <button class="upload-button secondary" id="settings-modal-cancel" type="button">Close</button>
+          <button class="upload-button" id="settings-modal-save" type="button">Save Settings</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="model-name-modal" id="prediction-id-modal" hidden inert aria-hidden="true">
+      <div class="model-name-modal-backdrop" id="prediction-id-modal-backdrop"></div>
+      <section class="model-name-modal-card prediction-id-modal-card" id="prediction-id-modal-card" aria-labelledby="prediction-id-modal-title">
+        <div class="model-modal-header">
+          <div>
+            <p class="launcher-kicker">Load Data to Predict</p>
+            <h3 id="prediction-id-modal-title">Select Id Field</h3>
+          </div>
+          <button class="model-modal-close" id="prediction-id-modal-close" type="button" aria-label="Close id field dialog">
+            ×
+          </button>
+        </div>
+        <p class="model-modal-description" id="prediction-id-modal-description">
+          Choose the workbook field that should be shown as the Id beside each germplasm in the selection list.
+        </p>
+        <label class="selection-field prediction-id-modal-field" for="prediction-id-column-select">
+          <span class="selection-field-label">Selection of id field</span>
+          <div class="selection-field-control selection-field-control-single">
+            <select id="prediction-id-column-select" class="selection-listbox" disabled>
+              <option value="">No fields available</option>
+            </select>
+          </div>
+        </label>
+        <div class="model-name-modal-actions prediction-id-modal-actions">
+          <button class="upload-button secondary" id="prediction-id-modal-cancel" type="button" aria-label="Cancel id selection" title="Cancel id selection">
+            <span class="prediction-id-modal-button-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </span>
+          </button>
+          <button class="upload-button" id="prediction-id-modal-accept" type="button" disabled aria-label="Accept id selection" title="Accept id selection">
+            <span class="prediction-id-modal-button-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/choices.js@11.1.0/public/assets/scripts/choices.min.js"></script>
+    <script src="./src/main.js?v=20260706x" type="module"></script>
+    <script src="./src/launcher.js?v=20260706x" type="module"></script>
+  </body>
+  </html>

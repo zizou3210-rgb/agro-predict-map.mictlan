@@ -1,0 +1,27 @@
+services:
+  tasks:
+    container_name: phen_transform
+    build:
+      context: tasks/
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - FOLDER_DATA=/app/data
+      - HOURLY_URL=${HOURLY_URL}
+      - DAILY_URL=${DAILY_URL}
+      - MONTHLY_URL=${MONTHLY_URL}
+    networks:
+      phen-net:
+        aliases:
+          - transform-phen-net
+    tty: true
+    stdin_open: true
+    volumes:
+      - "${PATH_TO_CACHE}:/app/data/"
+
+networks:
+  phen-net:
+    name: phen-net
+    external: true
+      
+  

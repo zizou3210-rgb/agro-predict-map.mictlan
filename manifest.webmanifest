@@ -1,0 +1,27 @@
+{
+  "name": "Mictlan-AgriXGBoost",
+  "short_name": "Mictlan-AgriXGBoost",
+  "description": "Professional geospatial workspace for agricultural intelligence and Grain Yield prediction.",
+  "lang": "es-MX",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4efe6",
+  "theme_color": "#243a40",
+  "categories": ["productivity", "science", "maps"],
+  "icons": [
+    {
+      "src": "./icons/icon-app.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

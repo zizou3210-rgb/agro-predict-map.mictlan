@@ -1,0 +1,11 @@
+{
+  "name": "ea-phase1-gps-map",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "generate": "python3 scripts/generate_geojson.py",
+    "serve": "python3 server.py --port 3000",
+    "start": "python3 server.py --port 3000",
+    "dev": "python3 dev_autoreload.py --port 3000"
+  }
+}

@@ -1,0 +1,17 @@
+stages:
+  - deploy_production
+
+develop_celery:
+  variables:
+    SECURE_FILES_DOWNLOAD_PATH: .
+  stage: deploy_production
+  tags:
+    - production_phd
+  only:
+    - main
+  script:
+    - curl -s https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installer | bash
+    - ls -la
+    - docker compose -f compose.yaml down
+    - docker compose -f compose.yaml build
+    - docker compose -f compose.yaml up -d

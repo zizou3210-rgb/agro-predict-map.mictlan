@@ -1,0 +1,9 @@
+.venv/
+.~lock.*
+*_cache.sqlite
+__pycache__/
+.DS_Store
+*.jpg
+venv/
+
+

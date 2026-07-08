@@ -1,0 +1,156 @@
+{
+  "url": "https://power.larc.nasa.gov/api/temporal/hourly/point?start=20090401&end=20090831&latitude=48.7167&longitude=8.7833&community=re&parameters=ALLSKY_SFC_SW_DWN%2CCLRSKY_SFC_SW_DWN%2CALLSKY_KT&format=json&user=DAV&header=true&time-standard=lst",
+  "example": "https://power.larc.nasa.gov/api/temporal/hourly/point?start=20090403&end=20090807&latitude=48.7166666666667&longitude=8.78333333333333&community=re&parameters=ALLSKY_SFC_SW_DWN&format=json&user=test&header=true&time-standard=lst",
+  "parameters": {
+    "ALLSKY_SFC_SW_DWN": {
+      "units": "kW-hr/m^2/day",
+      "longname": "All Sky Surface Shortwave Downward Irradiance",
+      "description": "se refiere a la cantidad total de radiación solar que llega a la superficie terrestre desde todas las direcciones del cielo, teniendo en cuenta todas las condiciones atmosféricas (nubes, aerosoles, humedad, etc.). Esta medición es importante para comprender la cantidad de energía solar que realmente alcanza la superficie de la Tierra en un área determinada en un momento dado. Es un factor crucial en la comprensión del balance energético de la Tierra y en el estudio del clima y el clima solar."
+    },
+    "CLRSKY_SFC_SW_DWN": {
+      "units": "kW-hr/m^2/day",
+      "longname": "Clear Sky Surface Shortwave Downward Irradiance",
+      "description": "se refiere a la cantidad de radiación solar que alcanzaría la superficie terrestre si no hubiera nubes ni otros obstáculos atmosféricos que bloquearan la luz solar directa. En otras palabras, es la radiación solar directa que llegaría a la superficie en condiciones ideales de cielo despejado. Esta medida es importante para entender el potencial de radiación solar en ausencia de obstrucciones atmosféricas y sirve como referencia para comparar con la radiación real medida bajo condiciones atmosféricas reales."
+    },
+    "ALLSKY_KT": {
+      "units": "dimensionless",
+      "longname": "All Sky Insolation Clearness Index",
+      "description": "es un indicador que representa la relación entre la radiación solar medida en la superficie terrestre bajo cualquier condición atmosférica y la radiación solar que llegaría bajo condiciones ideales de cielo despejado (radiación solar directa o irradiación solar en condiciones de cielo claro). Este índice ayuda a comprender cuánta radiación solar real se está recibiendo en comparación con la radiación solar máxima teórica que se obtendría si no hubiera obstrucciones atmosféricas. Es una medida importante en el campo de la energía solar, ya que permite evaluar la eficiencia y la disponibilidad real de la radiación solar en un área específica, teniendo en cuenta las variaciones atmosféricas y las condiciones climáticas. Un índice alto indica que la cantidad de radiación solar medida es cercana a la cantidad máxima teórica, lo que implica condiciones atmosféricas favorables para la captación de energía solar."
+    },
+    "ALLSKY_SFC_LW_DWN": {
+      "units": "W/m^2",
+      "longname": "All Sky Surface Longwave Downward Irradiance",
+      "description": "se refiere a la cantidad de radiación de onda larga en el espectro del infrarrojo térmico que llega a la superficie terrestre desde todas las direcciones del cielo, considerando todas las condiciones atmosféricas. Esta radiación de onda larga representa la energía emitida por la atmósfera, las nubes y otros elementos hacia la superficie terrestre en forma de calor. Es una parte fundamental del balance de energía de la Tierra, ya que contribuye al calentamiento y la temperatura superficial. Esta radiación de onda larga es emitida por objetos con temperatura, por lo que tanto la Tierra como la atmósfera emiten este tipo de radiación térmica continuamente."
+    },
+    "ALLSKY_SFC_PAR_TOT": {
+      "units": "W/m^2",
+      "longname": "All Sky Surface PAR Total",
+      "description": "hace referencia a la cantidad total de radiación electromagnética en el rango de longitudes de onda fotosintéticamente activas que alcanza la superficie terrestre desde todas las direcciones del cielo, considerando todas las condiciones atmosféricas. El PAR incluye la radiación en el espectro de luz visible que es utilizada por las plantas para realizar la fotosíntesis. Esta radiación proporciona la energía necesaria para el proceso de conversión de la luz en energía química, permitiendo que las plantas crezcan y realicen su ciclo vital."
+    },
+    "CLRSKY_SFC_PAR_TOT": {
+      "units": "W/m^2",
+      "longname": "Clear Sky Surface PAR Total",
+      "description": "se refiere a la cantidad total de radiación electromagnética en el rango de longitudes de onda fotosintéticamente activas que llegaría a la superficie terrestre bajo condiciones ideales de cielo despejado. Esto implica que no hay obstáculos atmosféricos, como nubes, niebla o partículas suspendidas, que bloqueen la radiación solar. Esta medida representa la radiación solar disponible para la fotosíntesis en ausencia de obstrucciones atmosféricas, proporcionando un punto de referencia para comprender la cantidad máxima teórica de luz fotosintéticamente activa que las plantas podrían recibir en un área determinada. Es útil en la agricultura, la ecología y la investigación forestal para comprender el potencial de radiación solar para el crecimiento y desarrollo de las plantas en ausencia de interferencias atmosféricas."
+    },
+    "ALLSKY_SFC_UVA": {
+      "units": "W/m^2",
+      "longname": "All Sky Surface UVA Irradiance",
+      "description": "se refiere a la cantidad de radiación ultravioleta tipo A (UVA) que llega a la superficie terrestre desde todas las direcciones del cielo, teniendo en cuenta todas las condiciones atmosféricas. La radiación UVA es parte del espectro ultravioleta y tiene longitudes de onda más largas que la radiación UVB y UVC. Aunque es menos energética que la radiación UVB, la UVA aún puede afectar la piel y contribuir al bronceado, así como tener impactos en la salud y el medio ambiente. La medición de la "All Sky Surface UVA Irradiance" es importante para comprender la exposición total a la radiación ultravioleta y evaluar sus efectos en la salud humana, la biología de los organismos y los materiales, así como en los ecosistemas en general."
+    },
+    "ALLSKY_SFC_UVB": {
+      "units": "W/m^2",
+      "longname": "All Sky Surface UVB Irradiance",
+      "description": "se refiere a la cantidad de radiación ultravioleta tipo B (UVB) que alcanza la superficie terrestre desde todas las direcciones del cielo, considerando todas las condiciones atmosféricas. La radiación UVB tiene longitudes de onda más cortas y es más energética que la radiación UVA. Esta radiación puede tener efectos importantes en la salud humana y en los ecosistemas. Por ejemplo, es responsable de la producción de vitamina D en la piel, pero también puede causar daño solar, quemaduras, envejecimiento prematuro de la piel y aumentar el riesgo de cáncer de piel. Además, la radiación UVB puede afectar a los seres vivos, desde las plantas hasta los organismos acuáticos, y puede influir en procesos biológicos y ecológicos."
+    },
+    "ALLSKY_SFC_UV_INDEX": {
+      "units": "dimensionless",
+      "longname": "All Sky Surface UV Index",
+      "description": " es una medida que representa la intensidad de la radiación ultravioleta (UV) que llega a la superficie terrestre desde todas las direcciones del cielo, considerando todas las condiciones atmosféricas. Este índice es una forma de comunicar el nivel de radiación UV solar que una persona podría estar recibiendo en un lugar determinado y en un momento específico. Cuanto mayor sea el valor del índice UV, mayor será la intensidad de la radiación ultravioleta y, por lo tanto, mayor será el riesgo de daño para la piel y los ojos si no se toman precauciones adecuadas, como el uso de protector solar, ropa protectora y gafas de sol."
+    },
+    "T2M": {
+      "units": "C",
+      "longname": "Temperature at 2 Meters",
+      "description": "temperatura a 2 metros de altura"
+    },
+    "T2MDEW": {
+      "units": "C",
+      "longname": "Dew/Frost Point at 2 Meters",
+      "description": "son términos relacionados con la temperatura a la que el vapor de agua se condensa en forma de rocío o escarcha, respectivamente. Dew Point  Es la temperatura a la que el aire debe enfriarse a presión constante para que el vapor de agua en él se condense en forma de rocío. Si el aire se enfría hasta el punto de rocío, la humedad relativa alcanza el 100%. Frost Point Es similar al punto de rocío pero se aplica específicamente a la formación de escarcha, donde el vapor de agua se transforma directamente en hielo. Medir el punto de rocío o el punto de escarcha a 2 metros de altura implica tomar la temperatura a esa altura para determinar cuándo las condiciones podrían ser propicias para la formación de rocío o escarcha a esa altura. Esto es útil para comprender las condiciones locales y cómo pueden afectar, por ejemplo, la formación de humedad en plantas o estructuras a esa altura."
+    },
+    "T2MWET": {
+      "units": "C",
+      "longname": "Wet Bulb Temperature at 2 Meters",
+      "description": "(temperatura de bulbo húmedo) es una medida que refleja la temperatura más baja que se puede alcanzar mediante la evaporación de agua en un termómetro envuelto en un material húmedo expuesto al aire. A menudo se usa como un indicador de la humedad y se relaciona estrechamente con la humedad relativa y la temperatura ambiente."
+    },
+    "TS": {
+      "units": "C",
+      "longname": "Earth Skin Temperature",
+      "description": "(Temperatura de la piel de la Tierra) se refiere a la temperatura superficial de la Tierra, que puede variar según la región geográfica, la hora del día, las condiciones climáticas y otros factores. Esta medida representa la temperatura promedio de la superficie terrestre en un área específica en un momento dado."
+    },
+    "T2M_RANGE": {
+      "units": "C",
+      "longname": "Temperature at 2 Meters Range",
+      "description": "Diferencia entre maxima y minima temperatura"
+    },
+    "T2M_MAX": {
+      "units": "C",
+      "longname": "Temperature at 2 Meters Maximum",
+      "description": "Maxima de temperatura"
+    },
+    "T2M_MIN": {
+      "units": "C",
+      "longname": "Temperature at 2 Meters Minimum",
+      "description": "Minimo de temperatura"
+    },
+    "QV2M": {
+      "units": "g/kg",
+      "longname": "Specific Humidity at 2 Meters",
+      "description": "se refiere a la humedad específica medida a una altura de 2 metros sobre la superficie terrestre. La humedad específica es una medida de la cantidad de vapor de agua presente en el aire, expresada en términos de masa de vapor de agua por unidad de masa de aire seco. - gramos de vapor de agua por kilogramo de aire seco (g/kg). "
+    },
+    "RH2M": {
+      "units": "%",
+      "longname": "Relative Humidity at 2 Meters",
+      "description": "Humedad relativa"
+    },
+    "PRECTOTCORR": {
+      "units": "mm/day",
+      "longname": "Precipitation Corrected",
+      "description": "referirse a la precipitación pluvial que ha sido ajustada o corregida por diferentes motivos, como: Corrección por pérdida de agua por evaporación: Ajustar la cantidad de precipitación registrada para tener en cuenta la cantidad de agua que puede haberse perdido por evaporación antes de que la lluvia alcance el instrumento de medición. Corrección por errores de medición: Realizar ajustes en los datos de precipitación para corregir errores conocidos o potenciales en el equipo de medición, como desviaciones del viento, problemas con el colector de lluvia, etc. Corrección por anomalías climáticas: Ajustar los datos de precipitación para tener en cuenta anomalías climáticas o condiciones inusuales que podrían haber afectado la medición inicial."
+    },
+    "PS": {
+      "units": "kPa",
+      "longname": "Surface Pressure",
+      "description": " se refiere a la presión atmosférica medida a nivel del suelo o la superficie terrestre. Es la presión ejercida por la masa de aire sobre un área en la superficie de la Tierra debido al peso de la columna de aire sobre esa área."
+    },
+    "WS10M": {
+      "units": "m/s",
+      "longname": "Wind Speed at 10 Meters",
+      "description": " se refiere a la velocidad del viento medida a una altura de 10 metros sobre la superficie terrestre. Esta altura se elige porque generalmente está por encima de la mayoría de los obstáculos en tierra que podrían afectar la medición precisa de la velocidad del viento, como árboles, edificios u otras estructuras."
+    },
+    "WS10M_MAX": {
+      "units": "m/s",
+      "longname": "Wind Speed at 10 Meters Maximum",
+      "description": "se refiere a la velocidad máxima del viento registrada a una altura de 10 metros sobre la superficie terrestre en un período de tiempo determinado."
+    },
+    "WS10M_MIN": {
+      "units": "m/s",
+      "longname": "Wind Speed at 10 Meters Minimum",
+      "description": "se refiere a la velocidad minima del viento registrada a una altura de 10 metros sobre la superficie terrestre en un período de tiempo determinado."
+    },
+    "WS10M_RANGE": {
+      "units": "m/s",
+      "longname": "Wind Speed at 10 Meters Range",
+      "description": "se refiere a la diferencia entre la velocidad maxima y minima del viento registrada a una altura de 10 metros sobre la superficie terrestre en un período de tiempo determinado."
+    },
+    "WD10M": {
+      "units": "Degrees",
+      "longname": "Wind Direction at 10 Meters",
+      "description": "se refiere a la dirección desde la cual sopla el viento a una altura de 10 metros sobre la superficie terrestre. Esta medida describe la dirección hacia la cual el viento está fluyendo, indicando de dónde proviene."
+    },
+    "WS50M": {
+      "units": "m/s",
+      "longname": "Wind Speed at 50 Meters",
+      "description": " se refiere a la velocidad del viento medida a una altura de 50 metros sobre la superficie terrestre. Esta altura se elige porque generalmente está por encima de la mayoría de los obstáculos en tierra que podrían afectar la medición precisa de la velocidad del viento, como árboles, edificios u otras estructuras."
+    },
+    "WS50M_MAX": {
+      "units": "m/s",
+      "longname": "Wind Speed at 50 Meters Maximum",
+      "description": "se refiere a la velocidad máxima del viento registrada a una altura de 50 metros sobre la superficie terrestre en un período de tiempo determinado."
+    },
+    "WS50M_MIN": {
+      "units": "m/s",
+      "longname": "Wind Speed at 50 Meters Minimum",
+      "description": "se refiere a la velocidad minima del viento registrada a una altura de 50 metros sobre la superficie terrestre en un período de tiempo determinado."
+    },
+    "WS50M_RANGE": {
+      "units": "m/s",
+      "longname": "Wind Speed at 50 Meters Range",
+      "description": "se refiere a la diferencia entre la velocidad maxima y minima del viento registrada a una altura de 50 metros sobre la superficie terrestre en un período de tiempo determinado."
+    },
+    "WD50M": {
+      "units": "Degrees",
+      "longname": "Wind Direction at 50 Meters",
+      "description": "se refiere a la dirección desde la cual sopla el viento a una altura de 50 metros sobre la superficie terrestre. Esta medida describe la dirección hacia la cual el viento está fluyendo, indicando de dónde proviene."
+    }
+  }
+}
