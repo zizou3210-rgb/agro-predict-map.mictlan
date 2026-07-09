@@ -79,6 +79,8 @@ SKIP_RELATIVE_PATHS = {
     Path("ce_pipeline") / "model",
     Path("preprocess") / "phase01_quality_prepared",
     Path("dist"),
+    Path("installers") / "runtimes",
+    Path("installers") / "runtime-archives",
 }
 PIPELINE_MODEL_CODE_FILES = {
     "__init__.py",
