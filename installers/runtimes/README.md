@@ -18,4 +18,4 @@ Each folder should contain a platform-native runtime tree. Examples:
 
 Build command:
 
-`python3 cimmyt_app/installers/build_native_runtime_packages.py`
+`python3 installers/build_native_runtime_packages.py`
