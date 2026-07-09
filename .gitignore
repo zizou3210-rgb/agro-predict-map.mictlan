@@ -20,6 +20,10 @@ ce_pipeline/model/
 preprocess/phase01_quality_prepared/
 source/
 template/
+!template/
+template/*
+!template/phase1.xlsx
+!template/canonical_template_superset_88.csv
 tests/source/
 resources/featurehero/.venv/
 
