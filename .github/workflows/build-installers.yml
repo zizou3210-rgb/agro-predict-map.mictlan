@@ -124,6 +124,7 @@ jobs:
         with:
           name: runtime-${{ matrix.platform }}
           path: installers/runtimes/${{ matrix.platform }}
+          include-hidden-files: true
           if-no-files-found: error
 
   assemble-installers:
