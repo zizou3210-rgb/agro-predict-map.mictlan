@@ -136,6 +136,19 @@ def resolve_featurehero_runtime_dir(app_dir: Path | None = None) -> Path:
     return base_app_dir / "resources" / "featurehero" / ".venv"
 
 
+def resolve_bundled_runtime_dir(platform_name: str) -> Path:
+    return APP_DIR / "runtime" / platform_name
+
+
+def iter_runtime_python_candidates(venv_dir: Path) -> list[Path]:
+    return [
+        venv_dir / "bin" / "python3",
+        venv_dir / "bin" / "python",
+        venv_dir / "Scripts" / "python.exe",
+        venv_dir / "Scripts" / "python3.exe",
+    ]
+
+
 def resolve_bootstrap_python() -> str:
     candidates = [
         shutil.which("python3.12"),
@@ -156,13 +169,15 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool) -> str:
         return "FeatureHero source directory was not found; runtime bootstrap skipped."
 
     venv_dir = resolve_featurehero_runtime_dir(app_dir)
+    existing_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
+    if existing_python is not None:
+        return f"FeatureHero runtime detected at {venv_dir}."
+
     python_exec = resolve_bootstrap_python()
-    venv_python = venv_dir / "bin" / "python3"
-    if not venv_python.exists():
-        subprocess.run([python_exec, "-m", "venv", str(venv_dir)], check=True)
-        venv_python = venv_dir / "bin" / "python3"
-        if not venv_python.exists():
-            venv_python = venv_dir / "bin" / "python"
+    subprocess.run([python_exec, "-m", "venv", str(venv_dir)], check=True)
+    venv_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
+    if venv_python is None:
+        raise FileNotFoundError(f"FeatureHero virtualenv Python was not created in: {venv_dir}")
 
     subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], check=True)
     subprocess.run([str(venv_python), "-m", "pip", "install", "."], cwd=str(featurehero_dir), check=True)
@@ -335,6 +350,31 @@ def should_skip_entry(relative_path: Path) -> bool:
     return False
 
 
+def stage_bundled_runtime(app_dir: Path, platform_name: str) -> str:
+    bundled_runtime_dir = resolve_bundled_runtime_dir(platform_name)
+    if not bundled_runtime_dir.exists():
+        return f"No bundled runtime was found for {platform_name}; fallback bootstrap will be used."
+
+    copied_any = False
+    for child in bundled_runtime_dir.iterdir():
+        destination = app_dir / child.name
+        if destination.exists():
+            if destination.is_dir():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+        if child.is_dir():
+            shutil.copytree(child, destination, symlinks=True)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(child, destination)
+        copied_any = True
+
+    if not copied_any:
+        return f"Bundled runtime directory for {platform_name} was empty; fallback bootstrap will be used."
+    return f"Bundled runtime copied from {bundled_runtime_dir}."
+
+
 def stage_application_snapshot() -> tuple[Path, list[str]]:
     install_root = resolve_install_root()
     app_install_dir = resolve_installed_app_dir()
@@ -365,6 +405,9 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
 
 def install_windows() -> str:
     install_root, copied_entries = stage_application_snapshot()
+    runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "windows")
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=False)
+    runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
@@ -383,12 +426,16 @@ def install_windows() -> str:
     save_state(created_files, install_root)
     return (
         "Instalacion completada en Windows. "
-        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los accesos."
+        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los accesos. "
+        f"{runtime_message}"
     )
 
 
 def install_linux() -> str:
     install_root, copied_entries = stage_application_snapshot()
+    runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "linux")
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=False)
+    runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
@@ -414,13 +461,16 @@ def install_linux() -> str:
     save_state(created_files, install_root)
     return (
         "Instalacion completada en Linux. "
-        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los lanzadores."
+        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los lanzadores. "
+        f"{runtime_message}"
     )
 
 
 def install_macos() -> str:
     install_root, copied_entries = stage_application_snapshot()
-    runtime_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=True)
+    runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "macos")
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=True)
+    runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
