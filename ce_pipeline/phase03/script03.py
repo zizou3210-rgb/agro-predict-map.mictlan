@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parents[2]
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -29,8 +29,8 @@ from urllib.request import Request, urlopen
 
 from PIL import Image
 
-from cimmyt_app.preprocess import ea_pipeline, soil_enrichment
-from cimmyt_app.pipeline.nasa_country_region import build_manual_grid_cells
+from preprocess import ea_pipeline, soil_enrichment
+from pipeline.nasa_country_region import build_manual_grid_cells
 
 PHASE01_SCRIPT = Path(__file__).resolve().parents[1] / "phase01" / "phase1.py"
 SOIL_TEXTURE_HEADER = soil_enrichment.SOIL_TEXTURE_HEADER

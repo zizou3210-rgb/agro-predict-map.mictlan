@@ -10,8 +10,8 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from cimmyt_app.preprocess import ea_pipeline
-from cimmyt_app.preprocess.runner import (
+from preprocess import ea_pipeline
+from preprocess.runner import (
     MANUAL_BBOX_CLEAR_COLUMNS,
     POINT_SAVED_MODEL_BASE_OVERRIDE_COLUMNS,
     clear_normalized_workbook_columns,
@@ -21,7 +21,7 @@ from cimmyt_app.preprocess.runner import (
     project_normalized_test_workbook_across_all_markers,
     run_preprocess_pipeline,
 )
-from cimmyt_app.config_env import get_prediction_bridge_dev_row_limit
+from config_env import get_prediction_bridge_dev_row_limit
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]

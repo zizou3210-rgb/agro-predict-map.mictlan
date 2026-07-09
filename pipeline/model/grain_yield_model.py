@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from cimmyt_app.pipeline.common import GERMPLASM_COLUMNS
-from cimmyt_app.pipeline.model_registry import get_latest_registered_model, get_registered_model
-from cimmyt_app.pipeline.resource_paths import ROOT_DIR, get_featurehero_python, get_featurehero_repo
+from pipeline.common import GERMPLASM_COLUMNS
+from pipeline.model_registry import get_latest_registered_model, get_registered_model
+from pipeline.resource_paths import ROOT_DIR, get_featurehero_python, get_featurehero_repo
 
 
 RUNTIME_SCRIPT = Path(__file__).resolve().parent / "runtime_predict.py"

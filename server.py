@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parent
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -36,12 +36,12 @@ from urllib.parse import unquote, urlparse
 from urllib.parse import parse_qs
 from xml.sax.saxutils import escape
 
-from cimmyt_app.pipeline.africa_country_localities import (
+from pipeline.africa_country_localities import (
     list_african_countries,
     sample_country_localities,
     sample_localities_within_bounds,
 )
-from cimmyt_app.config_env import (
+from config_env import (
     get_featurehero_settings,
     get_app_version,
     get_preprocess_validation_enabled,
@@ -50,13 +50,13 @@ from cimmyt_app.config_env import (
     load_app_env,
     update_featurehero_settings,
 )
-from cimmyt_app.pipeline.nasa_country_region import (
+from pipeline.nasa_country_region import (
     build_country_bounds_payload,
     build_manual_bounds_payload,
     build_manual_grid_payload,
     list_supported_country_bounds,
 )
-from cimmyt_app.pipeline.model_registry import (
+from pipeline.model_registry import (
     build_download_url,
     delete_registered_model,
     get_registered_model,
@@ -64,10 +64,10 @@ from cimmyt_app.pipeline.model_registry import (
     rename_registered_model,
     write_model_metadata,
 )
-from cimmyt_app.pipeline.manual_grid_interpolation import (
+from pipeline.manual_grid_interpolation import (
     build_manual_grid_interpolated_surface,
 )
-from cimmyt_app.workbook_preview import (
+from workbook_preview import (
     build_original_feature_collection_from_xlsx,
     describe_distinct_germplasm_names_from_xlsx,
     describe_workbook_columns,

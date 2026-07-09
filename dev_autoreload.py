@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parent
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -43,14 +43,14 @@ IGNORED_DIR_NAMES = {
     "node_modules",
 }
 IGNORED_RELATIVE_PARTS = {
-    "cimmyt_app/pipeline/model",
-    "cimmyt_app/resources/featurehero/.venv",
+    "pipeline/model",
+    "resources/featurehero/.venv",
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the cimmyt_app server and restart it when files under cimmyt_app/ change."
+        description="Run the app server and restart it when project files change."
     )
     parser.add_argument("--port", type=int, default=3000, help="Port to bind.")
     parser.add_argument(
@@ -121,7 +121,7 @@ def main() -> None:
     previous_snapshot = snapshot_files()
     server_process = start_server(args.port)
     print(f"[dev-autoreload] serving http://0.0.0.0:{args.port}/app/")
-    print("[dev-autoreload] watching cimmyt_app/ for changes")
+    print("[dev-autoreload] watching project files for changes")
 
     try:
         while True:

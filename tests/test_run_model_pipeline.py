@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from cimmyt_app.pipeline.run_model_pipeline import combine_geo_and_prediction_dataframes
+from pipeline.run_model_pipeline import combine_geo_and_prediction_dataframes
 
 
 class RunModelPipelineTest(unittest.TestCase):

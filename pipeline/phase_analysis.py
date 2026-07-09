@@ -13,14 +13,14 @@ from typing import Callable
 
 import pandas as pd
 
-from cimmyt_app.config_env import (
+from config_env import (
     get_featurehero_job_timeout_seconds,
     get_featurehero_params,
     load_app_env,
 )
-from cimmyt_app.pipeline.common import GEO_COLUMNS, GERMPLASM_COLUMNS
-from cimmyt_app.pipeline.model_registry import get_model_dir
-from cimmyt_app.pipeline.resource_paths import (
+from pipeline.common import GEO_COLUMNS, GERMPLASM_COLUMNS
+from pipeline.model_registry import get_model_dir
+from pipeline.resource_paths import (
     ROOT_DIR,
     get_featurehero_python,
     get_featurehero_repo,

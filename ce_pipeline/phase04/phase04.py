@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parents[2]
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -18,10 +18,10 @@ from typing import Callable
 
 import pandas as pd
 
-from cimmyt_app.pipeline.phase3 import build_final_df
-from cimmyt_app.pipeline.phase4 import normalize_dummy_source_value
-from cimmyt_app.pipeline.phase5 import apply_log_transform, clean_numeric_series, should_apply_log
-from cimmyt_app.preprocess.ea_pipeline import CLIMATE_HEADERS_WITH_UNITS
+from pipeline.phase3 import build_final_df
+from pipeline.phase4 import normalize_dummy_source_value
+from pipeline.phase5 import apply_log_transform, clean_numeric_series, should_apply_log
+from preprocess.ea_pipeline import CLIMATE_HEADERS_WITH_UNITS
 
 PHASE01_SCRIPT = Path(__file__).resolve().parents[1] / "phase01" / "phase1.py"
 CANONICAL_TARGET_COLUMN = "Grain Yield (T/Ha)"

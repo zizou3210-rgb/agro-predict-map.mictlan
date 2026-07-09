@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from cimmyt_app.workbook_preview import (
+from workbook_preview import (
     build_original_feature_collection_from_xlsx,
     describe_distinct_germplasm_names_from_xlsx,
     list_distinct_germplasm_names_from_xlsx,

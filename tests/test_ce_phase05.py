@@ -7,10 +7,10 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from cimmyt_app.ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
-from cimmyt_app.ce_pipeline.phase05.phase05 import run_ce_phase05
-from cimmyt_app.pipeline.common import dataframe_to_geojson
-from cimmyt_app.pipeline.model.grain_yield_model import GrainYieldPredictionOutputs
+from ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
+from ce_pipeline.phase05.phase05 import run_ce_phase05
+from pipeline.common import dataframe_to_geojson
+from pipeline.model.grain_yield_model import GrainYieldPredictionOutputs
 
 
 class PipelineGeojsonCountryTest(unittest.TestCase):

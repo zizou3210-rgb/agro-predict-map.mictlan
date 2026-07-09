@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parents[1]
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from cimmyt_app.ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
-from cimmyt_app.ce_pipeline.phase05.phase05 import run_ce_phase05
-from cimmyt_app.ce_pipeline.prediction.prediction import update_saved_model_prediction_metadata
-from cimmyt_app.pipeline.phase_analysis import run_phase_analysis
+from ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
+from ce_pipeline.phase05.phase05 import run_ce_phase05
+from ce_pipeline.prediction.prediction import update_saved_model_prediction_metadata
+from pipeline.phase_analysis import run_phase_analysis
 
 
 @dataclass

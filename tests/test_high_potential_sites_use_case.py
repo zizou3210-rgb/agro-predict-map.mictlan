@@ -9,13 +9,13 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from cimmyt_app.ce_pipeline.prediction.prediction import (
+from ce_pipeline.prediction.prediction import (
     PREDICTION_PREDICTED_COLUMN,
     run_ce_saved_model_prediction,
 )
-from cimmyt_app.ce_pipeline.phase05.phase05 import CePhase05Outputs
-from cimmyt_app.pipeline.common import dataframe_to_geojson
-from cimmyt_app.server import (
+from ce_pipeline.phase05.phase05 import CePhase05Outputs
+from pipeline.common import dataframe_to_geojson
+from server import (
     _build_manual_grid_profile_overlay_payload,
     build_prediction_display_feature_collection,
     should_skip_running_preprocess_geojson,

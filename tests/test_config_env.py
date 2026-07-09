@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cimmyt_app.config_env import (
+from config_env import (
     get_featurehero_settings,
     get_prediction_bridge_dev_row_limit,
     get_preprocess_validation_enabled,
