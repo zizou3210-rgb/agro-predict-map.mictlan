@@ -161,7 +161,7 @@ def resolve_bootstrap_python() -> str:
     return "python3"
 
 
-def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool) -> str:
+def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create: bool = True) -> str:
     featurehero_dir = app_dir / "resources" / "featurehero"
     if not featurehero_dir.exists():
         if required:
@@ -172,6 +172,10 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool) -> str:
     existing_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
     if existing_python is not None:
         return f"FeatureHero runtime detected at {venv_dir}."
+    if not allow_create:
+        raise FileNotFoundError(
+            f"FeatureHero bundled runtime was not found in the installer payload: {venv_dir}"
+        )
 
     python_exec = resolve_bootstrap_python()
     subprocess.run([python_exec, "-m", "venv", str(venv_dir)], check=True)
@@ -469,7 +473,7 @@ def install_linux() -> str:
 def install_macos() -> str:
     install_root, copied_entries = stage_application_snapshot()
     runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "macos")
-    runtime_bootstrap_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=True)
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=True, allow_create=False)
     runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
