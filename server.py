@@ -89,13 +89,14 @@ CE_TRAINING_SCRIPT = CE_PIPELINE_DIR / "training.py"
 CE_PHASE06_SCRIPT = CE_PIPELINE_DIR / "phase06" / "phase06.py"
 TOP_GERMPLASM_ENABLED = False
 APP_RUNTIME_NAME = "MictlanAgriXGBoost"
-PREFERRED_PIPELINE_PYTHONS = [
-    Path(os.environ.get("APP_PIPELINE_PYTHON", "")).expanduser()
-    if os.environ.get("APP_PIPELINE_PYTHON")
-    else None,
-    APP_DIR / "resources" / "featurehero" / ".venv" / "bin" / "python",
-    Path(sys.executable).resolve(),
-]
+def get_preferred_pipeline_pythons() -> list[Path | None]:
+    return [
+        Path(os.environ.get("APP_PIPELINE_PYTHON", "")).expanduser()
+        if os.environ.get("APP_PIPELINE_PYTHON")
+        else None,
+        APP_DIR / "resources" / "featurehero" / ".venv" / "bin" / "python",
+        Path(sys.executable).resolve(),
+    ]
 
 
 def resolve_runtime_root() -> Path:
@@ -1653,7 +1654,7 @@ def find_free_port() -> int:
 
 
 def resolve_pipeline_python() -> Path:
-    for candidate in PREFERRED_PIPELINE_PYTHONS:
+    for candidate in get_preferred_pipeline_pythons():
         if candidate and candidate.exists():
             return candidate
     raise FileNotFoundError(

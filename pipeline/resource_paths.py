@@ -37,6 +37,8 @@ def get_featurehero_python() -> Path:
     for repo in repo_candidates:
         python_candidates.extend(
             [
+                repo / ".venv" / "Scripts" / "python.exe",
+                repo / ".venv" / "Scripts" / "python3.exe",
                 repo / ".venv" / "bin" / "python",
                 repo / ".venv" / "bin" / "python3",
                 repo / ".venv" / "bin" / "python3.12",
