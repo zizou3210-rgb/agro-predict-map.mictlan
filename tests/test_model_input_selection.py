@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from cimmyt_app.pipeline.common import GERMPLASM_COLUMNS
-from cimmyt_app.pipeline.model.grain_yield_model import (
+from pipeline.common import GERMPLASM_COLUMNS
+from pipeline.model.grain_yield_model import (
     build_model_input,
     read_model_feature_names,
     read_selected_feature_names,

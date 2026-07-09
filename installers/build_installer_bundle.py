@@ -4,7 +4,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from desktop_installer import OPTIONAL_APP_ENTRIES, REQUIRED_APP_ENTRIES, copy_entry
+from desktop_installer import (
+    OPTIONAL_APP_ENTRIES,
+    REQUIRED_APP_ENTRIES,
+    copy_entry,
+    resolve_latest_pipeline_model_dir,
+)
 
 
 INSTALLERS_DIR = Path(__file__).resolve().parent
@@ -26,6 +31,9 @@ def main() -> None:
         copy_entry(source, BUNDLE_DIR / entry_name)
         copied_entries.append(entry_name)
 
+    latest_model_dir = resolve_latest_pipeline_model_dir()
+    latest_model_name = latest_model_dir.name if latest_model_dir is not None else "none"
+
     for installer_name in [
         "Mictlan-AgriXGBoost_Installer.sh",
         "Mictlan-AgriXGBoost_Installer.command",
@@ -46,6 +54,7 @@ def main() -> None:
             "- Linux: Mictlan-AgriXGBoost_Installer.sh\n"
             "- macOS: Mictlan-AgriXGBoost_Installer.command\n"
             "\n"
+            f"Included pipeline model: {latest_model_name}\n"
             f"Copied app entries: {len(copied_entries)}\n"
         ),
         encoding="utf-8",

@@ -19,12 +19,12 @@ from urllib.request import Request, urlopen
 
 from openpyxl import Workbook, load_workbook
 
-from cimmyt_app.preprocess.phase1_schema import OUTPUT_HEADERS as PHASE1_COMPAT_HEADERS
-from cimmyt_app.pipeline.africa_country_localities import (
+from preprocess.phase1_schema import OUTPUT_HEADERS as PHASE1_COMPAT_HEADERS
+from pipeline.africa_country_localities import (
     load_country_localities,
     resolve_african_country,
 )
-from cimmyt_app.pipeline.nasa_country_region import (
+from pipeline.nasa_country_region import (
     build_manual_grid_cells,
     get_country_bounds,
     iter_country_tile_bounds,

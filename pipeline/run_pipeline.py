@@ -5,7 +5,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parents[1]
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -13,10 +13,10 @@ import argparse
 import json
 from pathlib import Path
 
-from cimmyt_app.ce_pipeline.prediction.prediction import run_ce_saved_model_prediction, run_saved_model_prediction
-from cimmyt_app.pipeline.progress import ProgressReporter
-from cimmyt_app.pipeline.run_model_pipeline import run_model_pipeline
-from cimmyt_app.preprocess.runner import run_preprocess_pipeline
+from ce_pipeline.prediction.prediction import run_ce_saved_model_prediction, run_saved_model_prediction
+from pipeline.progress import ProgressReporter
+from pipeline.run_model_pipeline import run_model_pipeline
+from preprocess.runner import run_preprocess_pipeline
 
 
 def build_argument_parser() -> argparse.ArgumentParser:

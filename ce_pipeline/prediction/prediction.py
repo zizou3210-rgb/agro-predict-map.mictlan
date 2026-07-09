@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parents[2]
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -20,24 +20,24 @@ from pathlib import Path
 import pandas as pd
 from openpyxl import load_workbook
 
-from cimmyt_app.ce_pipeline.phase01.phase1 import (
+from ce_pipeline.phase01.phase1 import (
     build_column_order,
     read_definition,
     read_sheet_headers_and_rows,
     write_xlsx,
 )
-from cimmyt_app.ce_pipeline.phase03.script03 import create_phase03_workbook
-from cimmyt_app.ce_pipeline.phase04.phase04 import create_phase04_workbook
-from cimmyt_app.ce_pipeline.phase05.phase05 import run_ce_phase05
-from cimmyt_app.pipeline.common import dataframe_to_geojson
-from cimmyt_app.pipeline.model_registry import get_registered_model, write_model_metadata
-from cimmyt_app.pipeline.run_model_pipeline import ModelPipelineOutputs, run_model_pipeline
-from cimmyt_app.preprocess.runner import (
+from ce_pipeline.phase03.script03 import create_phase03_workbook
+from ce_pipeline.phase04.phase04 import create_phase04_workbook
+from ce_pipeline.phase05.phase05 import run_ce_phase05
+from pipeline.common import dataframe_to_geojson
+from pipeline.model_registry import get_registered_model, write_model_metadata
+from pipeline.run_model_pipeline import ModelPipelineOutputs, run_model_pipeline
+from preprocess.runner import (
     PreprocessOutputs,
     resolve_point_uploaded_workbook_mode,
     run_preprocess_pipeline,
 )
-from cimmyt_app.workbook_preview import (
+from workbook_preview import (
     CLEAR_SELECTION_ID_SENTINEL,
     PREDICTION_GROUP_KEY_HEADER,
     PREDICTION_GROUP_LABEL_HEADER,

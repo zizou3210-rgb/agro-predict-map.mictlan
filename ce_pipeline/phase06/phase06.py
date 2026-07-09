@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parents[2]
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -20,12 +20,12 @@ from typing import Callable
 
 import pandas as pd
 
-from cimmyt_app.ce_pipeline.phase01.phase1 import create_phase1_workbook
-from cimmyt_app.ce_pipeline.phase02.phase02 import create_phase02_workbook
-from cimmyt_app.ce_pipeline.phase03.script03 import create_phase03_workbook
-from cimmyt_app.ce_pipeline.phase04.phase04 import create_phase04_workbook
-from cimmyt_app.ce_pipeline.phase05.phase05 import run_ce_phase05
-from cimmyt_app.pipeline.common import dataframe_to_geojson
+from ce_pipeline.phase01.phase1 import create_phase1_workbook
+from ce_pipeline.phase02.phase02 import create_phase02_workbook
+from ce_pipeline.phase03.script03 import create_phase03_workbook
+from ce_pipeline.phase04.phase04 import create_phase04_workbook
+from ce_pipeline.phase05.phase05 import run_ce_phase05
+from pipeline.common import dataframe_to_geojson
 
 
 PREDICTED_COLUMN = "Grain Yield predicted"

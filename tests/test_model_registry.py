@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cimmyt_app.pipeline import model_registry
+from pipeline import model_registry
 
 
 class TestModelRegistry(unittest.TestCase):

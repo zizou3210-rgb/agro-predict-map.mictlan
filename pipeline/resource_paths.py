@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-APP_DIR = ROOT_DIR / "cimmyt_app"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+APP_DIR = ROOT_DIR
 APP_RESOURCES_DIR = APP_DIR / "resources"
 
 
@@ -20,7 +20,7 @@ def get_featurehero_repo() -> Path:
     repo = _resolve_existing_path([APP_RESOURCES_DIR / "featurehero"])
     if repo is None:
         raise FileNotFoundError(
-            "FeatureHero repository was not found in cimmyt_app/resources/featurehero."
+            "FeatureHero repository was not found in resources/featurehero."
         )
     return repo
 
@@ -37,6 +37,8 @@ def get_featurehero_python() -> Path:
     for repo in repo_candidates:
         python_candidates.extend(
             [
+                repo / ".venv" / "Scripts" / "python.exe",
+                repo / ".venv" / "Scripts" / "python3.exe",
                 repo / ".venv" / "bin" / "python",
                 repo / ".venv" / "bin" / "python3",
                 repo / ".venv" / "bin" / "python3.12",
@@ -47,7 +49,7 @@ def get_featurehero_python() -> Path:
     if python_path is None:
         raise FileNotFoundError(
             "FeatureHero Python interpreter was not found in "
-            "cimmyt_app/resources/featurehero/.venv."
+            "resources/featurehero/.venv."
         )
     return python_path
 

@@ -8,7 +8,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from cimmyt_app.workbook_preview import _derive_country_from_coordinates
+from workbook_preview import _derive_country_from_coordinates
 
 
 GEO_COLUMNS = [

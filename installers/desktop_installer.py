@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local desktop runti
 
 
 APP_NAME = "Mictlan-AgriXGBoost"
+PACKAGE_DIR_NAME = "cimmyt_app"
 INSTALLERS_DIR = Path(__file__).resolve().parent
 APP_DIR = INSTALLERS_DIR.parent
 ROOT_DIR = APP_DIR.parent
@@ -74,10 +76,25 @@ SKIP_FILE_NAMES = {
 }
 SKIP_RELATIVE_PATHS = {
     Path("pipeline") / "runs",
-    Path("pipeline") / "model",
     Path("ce_pipeline") / "model",
     Path("preprocess") / "phase01_quality_prepared",
     Path("dist"),
+}
+PIPELINE_MODEL_CODE_FILES = {
+    "__init__.py",
+    "grain_yield_model.py",
+    "runtime_predict.py",
+}
+PIPELINE_MODEL_BUNDLE_FILES = {
+    "metadata.json",
+    "best_model_sort_original.pkl",
+    "best_features_sort_original.pkl",
+    "sort_original.csv",
+    "selection_summary.json",
+    "optimization_sort_original.csv",
+    "optimization_overlap_sort_original.csv",
+    "phase04_normalization_stats.json",
+    "phase04_selected_fields.csv",
 }
 
 
@@ -101,7 +118,7 @@ def resolve_install_root() -> Path:
 
 
 def resolve_installed_app_dir() -> Path:
-    return resolve_install_root() / "app"
+    return resolve_install_root() / "app" / PACKAGE_DIR_NAME
 
 
 def resolve_installed_installers_dir() -> Path:
@@ -110,6 +127,44 @@ def resolve_installed_installers_dir() -> Path:
 
 def resolve_state_file() -> Path:
     return resolve_install_root() / INSTALLER_STATE_NAME
+
+
+def resolve_featurehero_runtime_dir(app_dir: Path | None = None) -> Path:
+    base_app_dir = app_dir or resolve_installed_app_dir()
+    return base_app_dir / "resources" / "featurehero" / ".venv"
+
+
+def resolve_bootstrap_python() -> str:
+    candidates = [
+        shutil.which("python3.12"),
+        shutil.which("python3"),
+        shutil.which("python"),
+    ]
+    for candidate in candidates:
+        if candidate:
+            return candidate
+    return "python3"
+
+
+def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool) -> str:
+    featurehero_dir = app_dir / "resources" / "featurehero"
+    if not featurehero_dir.exists():
+        if required:
+            raise FileNotFoundError(f"FeatureHero source was not found in the installed app: {featurehero_dir}")
+        return "FeatureHero source directory was not found; runtime bootstrap skipped."
+
+    venv_dir = resolve_featurehero_runtime_dir(app_dir)
+    python_exec = resolve_bootstrap_python()
+    venv_python = venv_dir / "bin" / "python3"
+    if not venv_python.exists():
+        subprocess.run([python_exec, "-m", "venv", str(venv_dir)], check=True)
+        venv_python = venv_dir / "bin" / "python3"
+        if not venv_python.exists():
+            venv_python = venv_dir / "bin" / "python"
+
+    subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], check=True)
+    subprocess.run([str(venv_python), "-m", "pip", "install", "."], cwd=str(featurehero_dir), check=True)
+    return f"FeatureHero runtime prepared at {venv_dir}."
 
 
 def windows_targets() -> list[Path]:
@@ -196,6 +251,36 @@ def load_state() -> tuple[Path | None, list[Path]]:
     return install_root, installed_files
 
 
+def _read_json_file(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def resolve_latest_pipeline_model_dir() -> Path | None:
+    models_root = APP_DIR / "pipeline" / "model"
+    if not models_root.exists():
+        return None
+
+    candidates: list[tuple[str, Path]] = []
+    for child in models_root.iterdir():
+        if not child.is_dir():
+            continue
+        metadata_path = child / "metadata.json"
+        if not metadata_path.exists():
+            continue
+        metadata = _read_json_file(metadata_path)
+        sort_key = str(metadata.get("created_at") or child.name)
+        candidates.append((sort_key, child))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
 def copy_entry(source: Path, destination: Path, relative_path: Path | None = None) -> None:
     normalized_relative_path = relative_path or Path(source.name)
     if should_skip_entry(normalized_relative_path):
@@ -214,6 +299,26 @@ def should_skip_entry(relative_path: Path) -> bool:
     if not normalized_parts:
         return False
     normalized_path = Path(*normalized_parts)
+    pipeline_model_root = Path("pipeline") / "model"
+    if normalized_path == pipeline_model_root:
+        return False
+    if pipeline_model_root in normalized_path.parents:
+        latest_model_dir = resolve_latest_pipeline_model_dir()
+        latest_model_name = latest_model_dir.name if latest_model_dir is not None else ""
+        relative_to_model_root = normalized_path.relative_to(pipeline_model_root)
+        if len(relative_to_model_root.parts) == 1:
+            entry_name = relative_to_model_root.name
+            if entry_name in PIPELINE_MODEL_CODE_FILES:
+                return False
+            if entry_name == latest_model_name:
+                return False
+            return True
+        model_name = relative_to_model_root.parts[0]
+        if model_name != latest_model_name:
+            return True
+        if relative_to_model_root.name in PIPELINE_MODEL_BUNDLE_FILES:
+            return False
+        return True
     if normalized_path in SKIP_RELATIVE_PATHS:
         return True
     if any(parent in SKIP_RELATIVE_PATHS for parent in normalized_path.parents):
@@ -313,6 +418,7 @@ def install_linux() -> str:
 
 def install_macos() -> str:
     install_root, copied_entries = stage_application_snapshot()
+    runtime_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=True)
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
@@ -332,7 +438,8 @@ def install_macos() -> str:
     save_state(created_files, install_root)
     return (
         "Instalacion completada en macOS. "
-        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los lanzadores."
+        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los lanzadores. "
+        f"{runtime_message}"
     )
 
 
@@ -501,6 +608,10 @@ def main() -> None:
     args = parse_args()
     if args.headless or args.install or args.uninstall:
         message = uninstall_desktop() if args.uninstall else install_for_current_platform()
+        print(message)
+        return
+    if tk is None or messagebox is None:
+        message = install_for_current_platform()
         print(message)
         return
     root = build_ui()

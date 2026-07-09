@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cimmyt_app.preprocess import ea_pipeline
-from cimmyt_app.preprocess.soil_enrichment import (
+from preprocess import ea_pipeline
+from preprocess.soil_enrichment import (
     DEFAULT_DEPTH_BUCKET,
     enrich_manual_bbox_prediction_soils,
     pipeline_texture_bucket,
     usda_texture_class_from_fractions,
 )
-from cimmyt_app.pipeline.africa_country_localities import (
+from pipeline.africa_country_localities import (
     filter_localities_within_bounds,
     list_african_countries,
     normalize_bounds,
@@ -160,7 +160,7 @@ class AfricanCountryLocalitiesTest(unittest.TestCase):
         mock_download_geonames_country_dump,
         mock_parse_geonames_localities,
     ) -> None:
-        from cimmyt_app.pipeline.africa_country_localities import load_country_localities
+        from pipeline.africa_country_localities import load_country_localities
 
         locality_rows = [
             {

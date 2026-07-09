@@ -11,12 +11,12 @@ from typing import Callable
 
 from openpyxl import Workbook, load_workbook
 
-from cimmyt_app.config_env import (
+from config_env import (
     get_prediction_bridge_dev_row_limit,
     get_preprocess_validation_enabled,
 )
-from cimmyt_app.preprocess import ea_pipeline
-from cimmyt_app.preprocess.soil_enrichment import enrich_manual_bbox_prediction_soils
+from preprocess import ea_pipeline
+from preprocess.soil_enrichment import enrich_manual_bbox_prediction_soils
 
 
 PHASE_DIR_NAMES = {
@@ -111,10 +111,7 @@ def normalize_selected_germplasm_name(value: object) -> str:
 
 def read_canonical_headers() -> list[str]:
     template_csv = (
-        Path(__file__).resolve().parents[2]
-        / "cimmyt_app"
-        / "template"
-        / "canonical_template_superset_88.csv"
+        Path(__file__).resolve().parents[1] / "template" / "canonical_template_superset_88.csv"
     )
     with template_csv.open("r", encoding="utf-8", newline="") as handle:
         return next(csv.reader(handle))

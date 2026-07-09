@@ -5,4 +5,4 @@ if [ -f "$SCRIPT_DIR/desktop_installer.py" ]; then
 else
   INSTALLER_SCRIPT="$SCRIPT_DIR/installers/desktop_installer.py"
 fi
-python3 "$INSTALLER_SCRIPT"
+python3 "$INSTALLER_SCRIPT" --headless --install
