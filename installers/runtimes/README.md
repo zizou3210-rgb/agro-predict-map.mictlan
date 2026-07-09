@@ -1,6 +1,6 @@
 Place native runtimes here before building fully self-contained installers.
 
-Expected folders:
+Expected folders after extracting the platform archives:
 
 - `installers/runtimes/linux/`
 - `installers/runtimes/windows/`
@@ -15,6 +15,14 @@ Each folder should contain a platform-native runtime tree. Examples:
   or `python/python.exe`
 - macOS:
   `resources/featurehero/.venv/bin/python3`
+
+GitHub Actions now builds and uploads one compressed runtime archive per platform:
+
+- `runtime-linux.tar.gz`
+- `runtime-windows.tar.gz`
+- `runtime-macos.tar.gz`
+
+The assemble step extracts those archives back into `installers/runtimes/<platform>/` before running the native packaging script.
 
 Build command:
 

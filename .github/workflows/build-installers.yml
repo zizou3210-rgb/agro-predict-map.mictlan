@@ -119,12 +119,29 @@ jobs:
           New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
           Copy-Item -Recurse -Force resources/featurehero/.venv "$runtimeDir/.venv"
 
+      - name: Archive runtime tree (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_dir="installers/runtime-archives"
+          mkdir -p "$archive_dir"
+          tar -C installers/runtimes/${{ matrix.platform }} -czf "$archive_dir/runtime-${{ matrix.platform }}.tar.gz" .
+
+      - name: Archive runtime tree (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $archiveDir = "installers/runtime-archives"
+          New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
+          tar -C "installers/runtimes/${{ matrix.platform }}" -czf "$archiveDir/runtime-${{ matrix.platform }}.tar.gz" .
+
       - name: Upload runtime artifact
         uses: actions/upload-artifact@v4
         with:
           name: runtime-${{ matrix.platform }}
-          path: installers/runtimes/${{ matrix.platform }}
-          include-hidden-files: true
+          path: installers/runtime-archives/runtime-${{ matrix.platform }}.tar.gz
           if-no-files-found: error
 
   assemble-installers:
@@ -157,36 +174,34 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Download Linux runtime
+      - name: Download Linux runtime archive
         uses: actions/download-artifact@v4
         with:
           name: runtime-linux
-          path: installers/runtimes/linux
+          path: installers/runtime-archives/linux
 
-      - name: Download Windows runtime
+      - name: Download Windows runtime archive
         uses: actions/download-artifact@v4
         with:
           name: runtime-windows
-          path: installers/runtimes/windows
+          path: installers/runtime-archives/windows
 
-      - name: Download macOS runtime
+      - name: Download macOS runtime archive
         uses: actions/download-artifact@v4
         with:
           name: runtime-macos
-          path: installers/runtimes/macos
+          path: installers/runtime-archives/macos
 
-      - name: Normalize downloaded runtime layout
+      - name: Extract runtime archives
         shell: bash
         run: |
           set -euo pipefail
           for platform in linux windows macos; do
-            if [ -d "installers/runtimes/${platform}/${platform}" ]; then
-              tmp_dir="installers/runtimes/${platform}.__tmp__"
-              rm -rf "$tmp_dir"
-              mv "installers/runtimes/${platform}/${platform}" "$tmp_dir"
-              rm -rf "installers/runtimes/${platform}"
-              mv "$tmp_dir" "installers/runtimes/${platform}"
-            fi
+            archive="installers/runtime-archives/${platform}/runtime-${platform}.tar.gz"
+            target="installers/runtimes/${platform}"
+            rm -rf "$target"
+            mkdir -p "$target"
+            tar -xzf "$archive" -C "$target"
           done
 
       - name: Build native installer archives
