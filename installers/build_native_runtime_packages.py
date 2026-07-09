@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 from zipfile import ZIP_STORED, ZipFile
 
@@ -113,6 +114,7 @@ def main() -> None:
         for item in errors:
             print()
             print(item)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
