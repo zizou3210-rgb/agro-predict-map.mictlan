@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,7 @@ SKIP_RELATIVE_PATHS = {
     Path("dist"),
     Path("installers") / "runtimes",
     Path("installers") / "runtime-archives",
+    Path("resources") / "featurehero" / ".venv",
 }
 PIPELINE_MODEL_CODE_FILES = {
     "__init__.py",
@@ -140,6 +142,11 @@ def resolve_bundled_runtime_dir(platform_name: str) -> Path:
     return APP_DIR / "runtime" / platform_name
 
 
+def resolve_bundled_macos_python_pkg(app_dir: Path | None = None) -> Path:
+    base_app_dir = app_dir or resolve_installed_app_dir()
+    return base_app_dir / "python-installer" / "python-3.12.pkg"
+
+
 def iter_runtime_python_candidates(venv_dir: Path) -> list[Path]:
     return [
         venv_dir / "bin" / "python3",
@@ -149,9 +156,45 @@ def iter_runtime_python_candidates(venv_dir: Path) -> list[Path]:
     ]
 
 
-def resolve_bootstrap_python() -> str:
+def python_version_tuple(python_exec: Path | str) -> tuple[int, int] | None:
+    try:
+        result = subprocess.run(
+            [str(python_exec), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    output = result.stdout.strip()
+    try:
+        major, minor = output.split(".", 1)
+        return int(major), int(minor)
+    except (ValueError, TypeError):
+        return None
+
+
+def resolve_python312_command() -> str | None:
     candidates = [
         shutil.which("python3.12"),
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        "/usr/local/bin/python3.12",
+        "/opt/homebrew/bin/python3.12",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        version = python_version_tuple(candidate)
+        if version and version >= (3, 12):
+            return str(candidate)
+    return None
+
+
+def resolve_bootstrap_python() -> str:
+    python312 = resolve_python312_command()
+    if python312:
+        return python312
+    candidates = [
         shutil.which("python3"),
         shutil.which("python"),
     ]
@@ -161,7 +204,36 @@ def resolve_bootstrap_python() -> str:
     return "python3"
 
 
-def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create: bool = True) -> str:
+def ensure_macos_python312(app_dir: Path) -> str:
+    python_exec = resolve_python312_command()
+    if python_exec:
+        return python_exec
+
+    pkg_path = resolve_bundled_macos_python_pkg(app_dir)
+    if not pkg_path.exists():
+        raise FileNotFoundError(
+            f"Bundled Python 3.12 installer was not found in the app snapshot: {pkg_path}"
+        )
+
+    install_command = f"installer -pkg {shlex.quote(str(pkg_path))} -target /"
+    if shutil.which("osascript"):
+        subprocess.run(
+            ["osascript", "-e", f'do shell script {install_command!r} with administrator privileges'],
+            check=True,
+        )
+    else:
+        raise RuntimeError(
+            "macOS Python 3.12 is required. Install it from the bundled pkg manually: "
+            f"{pkg_path}"
+        )
+
+    python_exec = resolve_python312_command()
+    if python_exec:
+        return python_exec
+    raise RuntimeError("Python 3.12 installation completed but python3.12 is still not available.")
+
+
+def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create: bool = True, python_exec: str | None = None) -> str:
     featurehero_dir = app_dir / "resources" / "featurehero"
     if not featurehero_dir.exists():
         if required:
@@ -171,14 +243,17 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
     venv_dir = resolve_featurehero_runtime_dir(app_dir)
     existing_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
     if existing_python is not None:
-        return f"FeatureHero runtime detected at {venv_dir}."
+        version = python_version_tuple(existing_python)
+        if version and version >= (3, 12):
+            return f"FeatureHero runtime detected at {venv_dir}."
+        shutil.rmtree(venv_dir, ignore_errors=True)
     if not allow_create:
         raise FileNotFoundError(
             f"FeatureHero bundled runtime was not found in the installer payload: {venv_dir}"
         )
 
-    python_exec = resolve_bootstrap_python()
-    subprocess.run([python_exec, "-m", "venv", str(venv_dir)], check=True)
+    selected_python = python_exec or resolve_bootstrap_python()
+    subprocess.run([selected_python, "-m", "venv", str(venv_dir)], check=True)
     venv_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
     if venv_python is None:
         raise FileNotFoundError(f"FeatureHero virtualenv Python was not created in: {venv_dir}")
@@ -410,7 +485,14 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
 def install_windows() -> str:
     install_root, copied_entries = stage_application_snapshot()
     runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "windows")
-    runtime_bootstrap_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=False)
+    bundled_python = resolve_bundled_python_command(resolve_installed_app_dir(), "windows")
+    if not bundled_python:
+        raise FileNotFoundError("Bundled Python 3.12 was not found for Windows installation.")
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(
+        resolve_installed_app_dir(),
+        required=False,
+        python_exec=bundled_python,
+    )
     runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
@@ -438,7 +520,14 @@ def install_windows() -> str:
 def install_linux() -> str:
     install_root, copied_entries = stage_application_snapshot()
     runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "linux")
-    runtime_bootstrap_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=False)
+    bundled_python = resolve_bundled_python_command(resolve_installed_app_dir(), "linux")
+    if not bundled_python:
+        raise FileNotFoundError("Bundled Python 3.12 was not found for Linux installation.")
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(
+        resolve_installed_app_dir(),
+        required=False,
+        python_exec=bundled_python,
+    )
     runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
@@ -473,7 +562,13 @@ def install_linux() -> str:
 def install_macos() -> str:
     install_root, copied_entries = stage_application_snapshot()
     runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "macos")
-    runtime_bootstrap_message = bootstrap_featurehero_runtime(resolve_installed_app_dir(), required=True, allow_create=False)
+    macos_python = ensure_macos_python312(resolve_installed_app_dir())
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(
+        resolve_installed_app_dir(),
+        required=True,
+        allow_create=True,
+        python_exec=macos_python,
+    )
     runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
