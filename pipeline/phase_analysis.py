@@ -443,14 +443,28 @@ def launch_featurehero(
         "--params",
         get_featurehero_params_json(),
     ]
-    subprocess.run(
-        command,
-        check=True,
-        cwd=str(featurehero_repo),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            cwd=str(featurehero_repo),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stdout_text = (exc.stdout or "").strip()
+        stderr_text = (exc.stderr or "").strip()
+        details: list[str] = [
+            "FeatureHero launch command failed.",
+            f"Command: {exc.cmd}",
+            f"Exit code: {exc.returncode}",
+        ]
+        if stdout_text:
+            details.append("stdout:\n" + stdout_text)
+        if stderr_text:
+            details.append("stderr:\n" + stderr_text)
+        raise RuntimeError("\n\n".join(details)) from exc
 
     after_jobs = read_jobs()
     pid, job_info = find_launched_job(before_jobs, after_jobs, data_file)
