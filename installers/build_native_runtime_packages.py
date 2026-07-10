@@ -23,6 +23,7 @@ EXPECTED_RUNTIME_MARKERS = {
     ],
     "macos": [
         Path("python-installer") / "python-3.12.pkg",
+        Path("runtime-libs") / "libomp.dylib",
     ],
 }
 
@@ -35,10 +36,10 @@ def has_runtime(platform_name: str) -> bool:
     base = runtime_dir(platform_name)
     if not base.exists():
         return False
-    for marker in EXPECTED_RUNTIME_MARKERS[platform_name]:
-        if (base / marker).exists():
-            return True
-    return False
+    markers = EXPECTED_RUNTIME_MARKERS[platform_name]
+    if platform_name == "macos":
+        return all((base / marker).exists() for marker in markers)
+    return any((base / marker).exists() for marker in markers)
 
 
 def ensure_runtime(platform_name: str) -> Path:
