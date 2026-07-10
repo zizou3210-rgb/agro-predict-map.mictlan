@@ -47,7 +47,7 @@ def _platform_note(platform_name: str) -> str:
         "Use: Mictlan-AgriXGBoost_Installer.command\n"
         "This package excludes the Linux-only FeatureHero .venv.\n"
         "During installation, the installer bootstraps a macOS-compatible FeatureHero .venv from the bundled source.\n"
-        "Requirements on the target Mac: Python 3.12+ available in PATH and internet access for pip dependencies.\n"
+        "The installer includes a bundled Python 3.12 package and rebuilds the FeatureHero .venv locally during installation.\n"
     )
 
 
