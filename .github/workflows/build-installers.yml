@@ -98,7 +98,7 @@ jobs:
           archive_dir="installers/runtime-archives"
           mkdir -p "$archive_dir"
           curl -L --fail --retry 3 \
-            https://www.python.org/ftp/python/3.12.13/python-3.12.13-macos11.pkg \
+            https://www.python.org/ftp/python/3.12.4/python-3.12.4-macos11.pkg \
             -o "$archive_dir/python-3.12.pkg"
 
       - name: Stage bundled Python 3.12 runtime (Windows)
