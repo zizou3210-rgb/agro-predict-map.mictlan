@@ -1,4 +1,4 @@
-Place native runtimes here before building fully self-contained installers.
+Place platform-native Python 3.12 payloads here before building fully self-contained installers.
 
 Expected folders after extracting the platform archives:
 
@@ -6,15 +6,16 @@ Expected folders after extracting the platform archives:
 - `installers/runtimes/windows/`
 - `installers/runtimes/macos/`
 
-Each folder should contain a platform-native runtime tree. Examples:
+Each folder should contain the Python 3.12 payload that the installer will use to create `resources/featurehero/.venv` locally on the destination machine.
+
+Examples:
 
 - Linux:
-  `resources/featurehero/.venv/bin/python3`
+  `python-runtime/bin/python3`
 - Windows:
-  `resources/featurehero/.venv/Scripts/python.exe`
-  or `python/python.exe`
+  `python-runtime/python.exe`
 - macOS:
-  `resources/featurehero/.venv/bin/python3`
+  `python-installer/python-3.12.pkg`
 
 GitHub Actions now builds and uploads one compressed runtime archive per platform:
 

@@ -52,7 +52,7 @@ jobs:
             python-version: '3.12'
           - platform: macos
             runner: macos-latest
-            python-version: '3.12'
+            python-version: '3.12.13'
 
     steps:
       - name: Checkout repository
@@ -79,55 +79,48 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Build FeatureHero venv (Linux)
+      - name: Stage bundled Python 3.12 runtime (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          cd resources/featurehero
-          python3 -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install .
+          runtime_dir="installers/runtimes/${{ matrix.platform }}/python-runtime"
+          rm -rf "$runtime_dir"
+          mkdir -p "$runtime_dir"
+          python_prefix=$(python3 -c "import sys; print(sys.prefix)")
+          cp -R "$python_prefix"/. "$runtime_dir"
 
-      - name: Build FeatureHero venv (macOS)
+      - name: Download bundled Python 3.12 installer (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          cd resources/featurehero
-          python3 -m venv --copies .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install .
+          archive_dir="installers/runtime-archives"
+          mkdir -p "$archive_dir"
+          curl -L --fail --retry 3 \
+            https://www.python.org/ftp/python/3.12.13/python-3.12.13-macos11.pkg \
+            -o "$archive_dir/python-3.12.pkg"
 
-      - name: Build FeatureHero venv (Windows)
+      - name: Stage bundled Python 3.12 runtime (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
-          Set-Location resources/featurehero
-          python -m venv .venv
-          .\.venv\Scripts\python.exe -m pip install --upgrade pip
-          .\.venv\Scripts\python.exe -m pip install .
+          $runtimeDir = "installers/runtimes/${{ matrix.platform }}/python-runtime"
+          if (Test-Path $runtimeDir) { Remove-Item $runtimeDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+          $pythonPrefix = python -c "import sys; print(sys.prefix)"
+          Copy-Item -Recurse -Force "$pythonPrefix\*" $runtimeDir
 
-      - name: Stage runtime tree (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Stage runtime tree (macOS)
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          runtime_dir="installers/runtimes/${{ matrix.platform }}/resources/featurehero"
+          runtime_dir="installers/runtimes/${{ matrix.platform }}/python-installer"
           rm -rf "$runtime_dir"
           mkdir -p "$runtime_dir"
-          cp -R resources/featurehero/.venv "$runtime_dir/.venv"
-
-      - name: Stage runtime tree (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          $runtimeDir = "installers/runtimes/${{ matrix.platform }}/resources/featurehero"
-          if (Test-Path $runtimeDir) { Remove-Item $runtimeDir -Recurse -Force }
-          New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
-          Copy-Item -Recurse -Force resources/featurehero/.venv "$runtimeDir/.venv"
+          cp installers/runtime-archives/python-3.12.pkg "$runtime_dir/python-3.12.pkg"
 
       - name: Archive runtime tree (Linux/macOS)
         if: runner.os != 'Windows'

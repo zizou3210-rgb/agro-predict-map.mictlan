@@ -14,16 +14,15 @@ RUNTIMES_DIR = INSTALLERS_DIR / "runtimes"
 PLATFORMS = ("linux", "windows", "macos")
 EXPECTED_RUNTIME_MARKERS = {
     "linux": [
-        Path("resources") / "featurehero" / ".venv" / "bin" / "python3",
-        Path("resources") / "featurehero" / ".venv" / "bin" / "python",
+        Path("python-runtime") / "bin" / "python3",
+        Path("python-runtime") / "bin" / "python",
     ],
     "windows": [
-        Path("resources") / "featurehero" / ".venv" / "Scripts" / "python.exe",
-        Path("python") / "python.exe",
+        Path("python-runtime") / "python.exe",
+        Path("python-runtime") / "python3.exe",
     ],
     "macos": [
-        Path("resources") / "featurehero" / ".venv" / "bin" / "python3",
-        Path("resources") / "featurehero" / ".venv" / "bin" / "python",
+        Path("python-installer") / "python-3.12.pkg",
     ],
 }
 
