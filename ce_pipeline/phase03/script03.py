@@ -16,6 +16,7 @@ import json
 import math
 import os
 import shutil
+import ssl
 import sys
 import time
 from collections import OrderedDict
@@ -27,6 +28,7 @@ from threading import Lock, RLock
 from typing import Callable
 from urllib.request import Request, urlopen
 
+import certifi
 from PIL import Image
 
 from preprocess import ea_pipeline, soil_enrichment
@@ -295,12 +297,17 @@ def _resolve_raster_request(dataset: str, current_date: date, cache_dir: Path) -
     return dataset_dir / filename, url
 
 
+def _build_ssl_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def _download_with_retries(url: str, target_path: Path) -> None:
     last_error: Exception | None = None
     request = Request(url, headers={"User-Agent": "cimmyt_app ce_pipeline climate"})
+    ssl_context = _build_ssl_context()
     for attempt in range(1, ea_pipeline.MAX_RETRIES + 1):
         try:
-            with urlopen(request, timeout=ea_pipeline.HTTP_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=ea_pipeline.HTTP_TIMEOUT_SECONDS, context=ssl_context) as response:
                 payload = response.read()
             target_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path = target_path.with_suffix(target_path.suffix + '.tmp')
