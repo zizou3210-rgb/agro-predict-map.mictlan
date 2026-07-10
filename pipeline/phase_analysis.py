@@ -24,6 +24,7 @@ from pipeline.resource_paths import (
     ROOT_DIR,
     get_featurehero_python,
     get_featurehero_repo,
+    get_macos_runtime_env,
     get_phen_transform_dataset_repo,
 )
 
@@ -429,6 +430,7 @@ def launch_featurehero(
         if not existing_pythonpath
         else f"{featurehero_pythonpath}:{existing_pythonpath}"
     )
+    env.update(get_macos_runtime_env())
 
     command = [
         str(featurehero_python),

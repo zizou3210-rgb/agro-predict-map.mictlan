@@ -56,3 +56,24 @@ def get_featurehero_python() -> Path:
 
 def get_phen_transform_dataset_repo() -> Path | None:
     return _resolve_existing_path([APP_RESOURCES_DIR / "phen_transform_dataset"])
+
+
+def get_macos_runtime_env() -> dict[str, str]:
+    if os.name != "posix" or os.sys.platform != "darwin":
+        return {}
+
+    candidates = [
+        APP_DIR / "runtime-libs" / "libomp.dylib",
+        APP_DIR / "runtime-libs" / "lib" / "libomp.dylib",
+    ]
+    libomp_path = _resolve_existing_path(candidates)
+    if libomp_path is None:
+        return {}
+
+    lib_dir = str(libomp_path.parent)
+    env_updates: dict[str, str] = {}
+    current_dyld = os.environ.get("DYLD_LIBRARY_PATH", "").strip()
+    current_fallback = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "").strip()
+    env_updates["DYLD_LIBRARY_PATH"] = lib_dir if not current_dyld else f"{lib_dir}:{current_dyld}"
+    env_updates["DYLD_FALLBACK_LIBRARY_PATH"] = lib_dir if not current_fallback else f"{lib_dir}:{current_fallback}"
+    return env_updates

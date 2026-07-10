@@ -101,6 +101,13 @@ jobs:
             https://www.python.org/ftp/python/3.12.4/python-3.12.4-macos11.pkg \
             -o "$archive_dir/python-3.12.pkg"
 
+      - name: Install bundled libomp dependency (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install libomp
+
       - name: Stage bundled Python 3.12 runtime (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -117,10 +124,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          runtime_dir="installers/runtimes/${{ matrix.platform }}/python-installer"
-          rm -rf "$runtime_dir"
-          mkdir -p "$runtime_dir"
-          cp installers/runtime-archives/python-3.12.pkg "$runtime_dir/python-3.12.pkg"
+          python_dir="installers/runtimes/${{ matrix.platform }}/python-installer"
+          libomp_dir="installers/runtimes/${{ matrix.platform }}/runtime-libs"
+          rm -rf "$python_dir" "$libomp_dir"
+          mkdir -p "$python_dir" "$libomp_dir"
+          cp installers/runtime-archives/python-3.12.pkg "$python_dir/python-3.12.pkg"
+          libomp_prefix=$(brew --prefix libomp)
+          cp "$libomp_prefix/lib/libomp.dylib" "$libomp_dir/libomp.dylib"
 
       - name: Archive runtime tree (Linux/macOS)
         if: runner.os != 'Windows'

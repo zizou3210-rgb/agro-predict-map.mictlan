@@ -108,6 +108,27 @@ def wait_for_server(url: str, timeout_seconds: float = 12.0) -> None:
             time.sleep(0.2)
 
 
+def build_runtime_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if sys.platform != "darwin":
+        return env
+
+    candidates = [
+        APP_DIR / "runtime-libs" / "libomp.dylib",
+        APP_DIR / "runtime-libs" / "lib" / "libomp.dylib",
+    ]
+    libomp_path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if libomp_path is None:
+        return env
+
+    lib_dir = str(libomp_path.parent)
+    current_dyld = str(env.get("DYLD_LIBRARY_PATH", "")).strip()
+    current_fallback = str(env.get("DYLD_FALLBACK_LIBRARY_PATH", "")).strip()
+    env["DYLD_LIBRARY_PATH"] = lib_dir if not current_dyld else f"{lib_dir}:{current_dyld}"
+    env["DYLD_FALLBACK_LIBRARY_PATH"] = lib_dir if not current_fallback else f"{lib_dir}:{current_fallback}"
+    return env
+
+
 def resolve_python_command() -> str:
     env_python = str(os.environ.get("PYTHON3", "")).strip()
     if env_python:
@@ -137,6 +158,7 @@ def main() -> None:
     server_process = subprocess.Popen(
         [resolve_python_command(), str(SERVER_SCRIPT), "--port", str(port)],
         cwd=str(ROOT_DIR),
+        env=build_runtime_env(),
     )
     try:
         wait_for_server(app_url)
