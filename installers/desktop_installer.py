@@ -216,9 +216,10 @@ def ensure_macos_python312(app_dir: Path) -> str:
         )
 
     install_command = f"installer -pkg {shlex.quote(str(pkg_path))} -target /"
+    apple_script_command = install_command.replace("\\", "\\\\").replace('"', '\\"')
     if shutil.which("osascript"):
         subprocess.run(
-            ["osascript", "-e", f'do shell script {install_command!r} with administrator privileges'],
+            ["osascript", "-e", f'do shell script "{apple_script_command}" with administrator privileges'],
             check=True,
         )
     else:
