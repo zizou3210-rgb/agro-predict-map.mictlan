@@ -30,23 +30,23 @@ def _platform_note(platform_name: str) -> str:
         return (
             "Linux package\n"
             "\n"
-            "This package includes the current FeatureHero runtime from the Linux build machine.\n"
             "Use: ./Mictlan-AgriXGBoost_Installer.sh\n"
+            "This package includes a bundled Python 3.12 runtime for Linux.\n"
+            "During installation, the installer rebuilds the FeatureHero .venv locally from resources/featurehero.\n"
         )
     if platform_name == "windows":
         return (
             "Windows package\n"
             "\n"
             "Use: Mictlan-AgriXGBoost_Installer.bat\n"
-            "This package excludes the Linux-only FeatureHero .venv.\n"
-            "A Windows-compatible Python environment for the model runtime must be provided separately.\n"
+            "This package includes a bundled Python 3.12 runtime for Windows.\n"
+            "During installation, the installer rebuilds the FeatureHero .venv locally from resources/featurehero.\n"
         )
     return (
         "macOS package\n"
         "\n"
         "Use: Mictlan-AgriXGBoost_Installer.command\n"
-        "This package excludes the Linux-only FeatureHero .venv.\n"
-        "During installation, the installer bootstraps a macOS-compatible FeatureHero .venv from the bundled source.\n"
+        "This package includes a bundled Python 3.12 installer for macOS.\n"
         "The installer includes a bundled Python 3.12 package and rebuilds the FeatureHero .venv locally during installation.\n"
     )
 
