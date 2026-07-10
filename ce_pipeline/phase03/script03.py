@@ -202,6 +202,23 @@ def resolve_shared_chc_cache_dir() -> Path:
     return resolve_runtime_root() / "cache" / "chc_climate"
 
 
+def resolve_phase03_worker_limit(kind: str, series_total: int) -> int:
+    env_name = "APP_PHASE03_PREFETCH_MAX_WORKERS" if kind == "prefetch" else "APP_PHASE03_COMPUTE_MAX_WORKERS"
+    raw_value = str(os.environ.get(env_name, "")).strip()
+    if raw_value:
+        try:
+            configured = max(1, int(raw_value))
+        except ValueError:
+            configured = 1
+        return max(1, min(configured, max(series_total, 1)))
+
+    if sys.platform == "darwin":
+        default_limit = 2 if kind == "prefetch" else 1
+    else:
+        default_limit = 6 if kind == "prefetch" else 4
+    return max(1, min(default_limit, max(series_total, 1)))
+
+
 def resolve_chc_pixel_metadata(latitude: float, longitude: float) -> tuple[str, float, float]:
     clamped_latitude = min(max(latitude, -89.999999), 89.999999)
     clamped_longitude = min(max(longitude, -179.999999), 179.999999)
@@ -565,7 +582,8 @@ def prefetch_chc_rasters(
         _download_with_retries(url, target_path)
         return target_path, True
 
-    worker_count = max(1, min(max_workers, total_tasks))
+    configured_workers = resolve_phase03_worker_limit("prefetch", total_tasks)
+    worker_count = max(1, min(max_workers, configured_workers, total_tasks))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_map = {executor.submit(resolve_task, dataset, current_date): (dataset, current_date) for dataset, current_date in task_specs}
         for future in as_completed(future_map):
@@ -1172,7 +1190,7 @@ def build_phase02_records_parallel_workspace(
         }
         return series_key, output_row, audit_row, local_stats
 
-    worker_count = max(2, min(4, total_unique_series)) if total_unique_series > 1 else 1
+    worker_count = resolve_phase03_worker_limit("compute", total_unique_series) if total_unique_series > 1 else 1
     configure_parallel_progress_context(
         progress_file=progress_file,
         progress_callback=progress_callback,
