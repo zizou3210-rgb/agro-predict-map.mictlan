@@ -28,7 +28,10 @@ from threading import Lock, RLock
 from typing import Callable
 from urllib.request import Request, urlopen
 
-import certifi
+try:
+    import certifi
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
+    certifi = None
 from PIL import Image
 
 from preprocess import ea_pipeline, soil_enrichment
@@ -315,7 +318,9 @@ def _resolve_raster_request(dataset: str, current_date: date, cache_dir: Path) -
 
 
 def _build_ssl_context() -> ssl.SSLContext:
-    return ssl.create_default_context(cafile=certifi.where())
+    if certifi is not None:
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
 
 
 def _download_with_retries(url: str, target_path: Path) -> None:
@@ -1085,6 +1090,7 @@ def build_phase02_records_parallel_workspace(
     progress_callback: ProgressCallback | None,
     skip_soil_enrichment: bool,
     climate_override: dict[str, object] | None = None,
+    target_column: str = ea_pipeline.YIELD_HEADER,
 ) -> tuple[list[str], list[dict[str, object]], dict[str, object]]:
     output_dir = ea_pipeline.PHASE_DIRS["phase02"]
     locality_metadata: dict[str, object] = {}
@@ -1276,9 +1282,9 @@ def build_phase02_records_parallel_workspace(
     }
 
     phase02_headers = (
-        ea_pipeline.build_country_locality_phase02_headers(headers)
+        ea_pipeline.build_country_locality_phase02_headers(headers, target_header=target_column)
         if locality_mode
-        else ea_pipeline.build_phase02_headers(headers)
+        else ea_pipeline.build_phase02_headers(headers, target_header=target_column)
     )
     phase02_records: list[dict[str, object]] = []
     matched_rows = 0
@@ -1448,6 +1454,7 @@ def create_phase03_workbook(
     if not headers:
         raise ValueError("The phase02 workbook is empty.")
     original_input_row_count = len(records)
+    target_column = str(initial_settings.get("target_column", "")).strip() or ea_pipeline.YIELD_HEADER
     records, normalized_date_stats = normalize_phase02_dates(records, initial_settings)
     headers, records = apply_initial_settings_aliases(headers, records, initial_settings)
     headers, records, merge_cleanup_metadata = prepare_ce_row_merge_keys(headers, records)
@@ -1695,6 +1702,7 @@ def create_phase03_workbook(
                 progress_callback=progress_callback,
                 skip_soil_enrichment=skip_soil_enrichment,
                 climate_override=climate_override,
+                target_column=target_column,
             )
     finally:
         ea_pipeline.load_nasa_cache = original_load_nasa_cache

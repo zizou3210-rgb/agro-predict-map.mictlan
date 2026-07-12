@@ -73,6 +73,7 @@ def run_ce_training(
         training_df,
         run_dir / "phase_analysis",
         training_input_csv,
+        target_column=target_column,
         progress_callback=training_progress_callback,
     )
     run_root = phase04_workbook.parents[2] if len(phase04_workbook.parents) >= 3 else run_dir.parent.parent
