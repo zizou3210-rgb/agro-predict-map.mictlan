@@ -89,6 +89,9 @@ CE_TRAINING_SCRIPT = CE_PIPELINE_DIR / "training.py"
 CE_PHASE06_SCRIPT = CE_PIPELINE_DIR / "phase06" / "phase06.py"
 TOP_GERMPLASM_ENABLED = False
 APP_RUNTIME_NAME = "MictlanAgriXGBoost"
+FEATUREHERO_DIR = APP_DIR / "resources" / "featurehero"
+PIPELINE_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL")
+
 def get_preferred_pipeline_pythons() -> list[Path | None]:
     return [
         Path(os.environ.get("APP_PIPELINE_PYTHON", "")).expanduser()
@@ -1653,10 +1656,62 @@ def find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def get_missing_pipeline_modules(python_exec: Path) -> list[str]:
+    probe = (
+        "import importlib.util, json; "
+        "mods=['featurehero','openpyxl','certifi','PIL']; "
+        "missing=[name for name in mods if importlib.util.find_spec(name) is None]; "
+        "print(json.dumps(missing))"
+    )
+    result = subprocess.run(
+        [str(python_exec), "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(APP_DIR),
+    )
+    payload = result.stdout.strip() or '[]'
+    try:
+        missing = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Unable to inspect pipeline dependencies for {python_exec}: {payload}") from exc
+    return [str(item) for item in missing]
+
+
+def ensure_pipeline_python_ready(python_exec: Path) -> Path:
+    missing_modules = get_missing_pipeline_modules(python_exec)
+    if not missing_modules:
+        return python_exec
+    if not FEATUREHERO_DIR.is_dir():
+        raise ModuleNotFoundError(
+            f"Missing pipeline dependencies ({', '.join(missing_modules)}) and the FeatureHero source directory was not found: {FEATUREHERO_DIR}"
+        )
+    subprocess.run(
+        [str(python_exec), "-m", "pip", "install", "--upgrade", "pip"],
+        check=True,
+        cwd=str(APP_DIR),
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [str(python_exec), "-m", "pip", "install", "."],
+        check=True,
+        cwd=str(FEATUREHERO_DIR),
+        capture_output=True,
+        text=True,
+    )
+    remaining_modules = get_missing_pipeline_modules(python_exec)
+    if remaining_modules:
+        raise ModuleNotFoundError(
+            f"The pipeline runtime is still missing modules after synchronization: {', '.join(remaining_modules)}"
+        )
+    return python_exec
+
+
 def resolve_pipeline_python() -> Path:
     for candidate in get_preferred_pipeline_pythons():
         if candidate and candidate.exists():
-            return candidate
+            return ensure_pipeline_python_ready(candidate)
     raise FileNotFoundError(
         "No local Python interpreter with the app pipeline dependencies was found."
     )
