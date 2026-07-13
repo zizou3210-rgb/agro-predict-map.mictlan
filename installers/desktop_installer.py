@@ -102,6 +102,30 @@ PIPELINE_MODEL_BUNDLE_FILES = {
 }
 
 
+INSTALLER_LOG_PATH: Path | None = None
+
+
+def console_log(message: str) -> None:
+    print(message, flush=True)
+    if INSTALLER_LOG_PATH is not None:
+        INSTALLER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with INSTALLER_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(message + "\n")
+
+
+def resolve_installer_log_path() -> Path:
+    install_root = resolve_install_root()
+    return install_root / "installer-output.log"
+
+
+def initialize_installer_logging() -> None:
+    global INSTALLER_LOG_PATH
+    INSTALLER_LOG_PATH = resolve_installer_log_path()
+    INSTALLER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INSTALLER_LOG_PATH.write_text("", encoding="utf-8")
+    console_log(f"[installer] Writing log to {INSTALLER_LOG_PATH}")
+
+
 def python_launcher() -> str:
     if os.name == "nt":
         base = Path(sys.executable)
@@ -236,6 +260,7 @@ def ensure_macos_python312(app_dir: Path) -> str:
 
 def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create: bool = True, python_exec: str | None = None) -> str:
     featurehero_dir = app_dir / "resources" / "featurehero"
+    console_log(f"[installer] Preparing FeatureHero runtime from {featurehero_dir}")
     if not featurehero_dir.exists():
         if required:
             raise FileNotFoundError(f"FeatureHero source was not found in the installed app: {featurehero_dir}")
@@ -246,7 +271,9 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
     if existing_python is not None:
         version = python_version_tuple(existing_python)
         if version and version >= (3, 12):
+            console_log(f"[installer] Reusing existing FeatureHero runtime at {venv_dir}")
             return f"FeatureHero runtime detected at {venv_dir}."
+        console_log(f"[installer] Removing incompatible runtime at {venv_dir}")
         shutil.rmtree(venv_dir, ignore_errors=True)
     if not allow_create:
         raise FileNotFoundError(
@@ -254,12 +281,15 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
         )
 
     selected_python = python_exec or resolve_bootstrap_python()
+    console_log(f"[installer] Creating virtual environment with {selected_python}")
     subprocess.run([selected_python, "-m", "venv", str(venv_dir)], check=True)
     venv_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
     if venv_python is None:
         raise FileNotFoundError(f"FeatureHero virtualenv Python was not created in: {venv_dir}")
 
+    console_log("[installer] Upgrading pip inside FeatureHero runtime")
     subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], check=True)
+    console_log("[installer] Installing FeatureHero package into the runtime")
     subprocess.run([str(venv_python), "-m", "pip", "install", "."], cwd=str(featurehero_dir), check=True)
     return f"FeatureHero runtime prepared at {venv_dir}."
 
@@ -432,6 +462,7 @@ def should_skip_entry(relative_path: Path) -> bool:
 
 def stage_bundled_runtime(app_dir: Path, platform_name: str) -> str:
     bundled_runtime_dir = resolve_bundled_runtime_dir(platform_name)
+    console_log(f"[installer] Staging bundled runtime for {platform_name} from {bundled_runtime_dir}")
     if not bundled_runtime_dir.exists():
         return f"No bundled runtime was found for {platform_name}; fallback bootstrap will be used."
 
@@ -457,6 +488,7 @@ def stage_bundled_runtime(app_dir: Path, platform_name: str) -> str:
 
 def stage_application_snapshot() -> tuple[Path, list[str]]:
     install_root = resolve_install_root()
+    console_log(f"[installer] Installing snapshot into {install_root}")
     app_install_dir = resolve_installed_app_dir()
     if app_install_dir.exists():
         shutil.rmtree(app_install_dir)
@@ -465,6 +497,7 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
     copied_entries: list[str] = []
     for entry_name in REQUIRED_APP_ENTRIES + OPTIONAL_APP_ENTRIES:
         source = APP_DIR / entry_name
+        console_log(f"[installer] Copying {entry_name}")
         if not source.exists():
             if entry_name in REQUIRED_APP_ENTRIES:
                 raise FileNotFoundError(f"Missing required app entry for installer snapshot: {source}")
@@ -484,16 +517,20 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
 
 
 def install_windows() -> str:
+    console_log("[installer] Starting Windows installation")
     install_root, copied_entries = stage_application_snapshot()
     runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "windows")
+    console_log(f"[installer] {runtime_copy_message}")
     bundled_python = resolve_bundled_python_command(resolve_installed_app_dir(), "windows")
     if not bundled_python:
         raise FileNotFoundError("Bundled Python 3.12 was not found for Windows installation.")
+    console_log(f"[installer] Using bundled Python: {bundled_python}")
     runtime_bootstrap_message = bootstrap_featurehero_runtime(
         resolve_installed_app_dir(),
         required=False,
         python_exec=bundled_python,
     )
+    console_log(f"[installer] {runtime_bootstrap_message}")
     runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
@@ -502,6 +539,7 @@ def install_windows() -> str:
     uninstall_command = f'start "" "{python_launcher()}" "{installer_script}" --uninstall'
 
     created_files: list[Path] = [install_root]
+    console_log("[installer] Creating Windows shortcuts")
     targets = windows_targets()
     for path in targets[:2]:
         write_windows_cmd(path, launch_command)
@@ -511,6 +549,7 @@ def install_windows() -> str:
         created_files.append(path)
 
     save_state(created_files, install_root)
+    console_log("[installer] Installation state saved")
     return (
         "Instalacion completada en Windows. "
         f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los accesos. "
@@ -759,8 +798,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.headless or args.install or args.uninstall:
-        message = uninstall_desktop() if args.uninstall else install_for_current_platform()
-        print(message)
+        initialize_installer_logging()
+        try:
+            message = uninstall_desktop() if args.uninstall else install_for_current_platform()
+            console_log(message)
+        except Exception as exc:
+            console_log(f"ERROR: {exc}")
+            raise
         return
     if tk is None or messagebox is None:
         message = install_for_current_platform()
