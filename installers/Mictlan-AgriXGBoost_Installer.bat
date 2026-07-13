@@ -1,19 +1,36 @@
 @echo off
 setlocal
-set SCRIPT=%~dp0desktop_installer.py
-if not exist "%SCRIPT%" set SCRIPT=%~dp0installers\desktop_installer.py
-set LOGDIR=%LOCALAPPDATA%\Mictlan-AgriXGBoost
-set LOGFILE=%LOGDIR%\installer-output.log
+cd /d "%~dp0"
 
+set "SCRIPT="
+set "CANDIDATE1=%~dp0desktop_installer.py"
+set "CANDIDATE2=%~dp0installers\desktop_installer.py"
+
+if exist "%CANDIDATE1%" set "SCRIPT=%CANDIDATE1%"
+if not defined SCRIPT if exist "%CANDIDATE2%" set "SCRIPT=%CANDIDATE2%"
+
+set "LOGDIR=%LOCALAPPDATA%\Mictlan-AgriXGBoost"
+set "LOGFILE=%LOGDIR%\installer-output.log"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" >nul 2>nul
 
-echo [installer] Using script: %SCRIPT%
+echo [installer] Working directory: %CD%
+echo [installer] Candidate 1: %CANDIDATE1%
+echo [installer] Candidate 2: %CANDIDATE2%
 echo [installer] Log file: %LOGFILE%
-if not exist "%SCRIPT%" (
+
+if not defined SCRIPT (
   echo [installer] ERROR: desktop_installer.py was not found.
+  echo [installer] Files in current directory:
+  dir /b
+  if exist "%~dp0installers" (
+    echo [installer] Files in installers directory:
+    dir /b "%~dp0installers"
+  )
   pause
   exit /b 1
 )
+
+echo [installer] Using script: %SCRIPT%
 
 where py >nul 2>nul
 if %ERRORLEVEL%==0 (
