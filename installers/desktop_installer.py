@@ -23,11 +23,15 @@ APP_NAME = "Mictlan-AgriXGBoost"
 PACKAGE_DIR_NAME = "cimmyt_app"
 WINDOWS_LAUNCHER_NAME = f"{APP_NAME}.cmd"
 WINDOWS_UNINSTALLER_NAME = f"Desinstalar {APP_NAME}.cmd"
+WINDOWS_SHORTCUT_NAME = f"{APP_NAME}.lnk"
+WINDOWS_UNINSTALL_SHORTCUT_NAME = f"Desinstalar {APP_NAME}.lnk"
 INSTALLERS_DIR = Path(__file__).resolve().parent
 APP_DIR = INSTALLERS_DIR.parent
 ROOT_DIR = APP_DIR.parent
 LAUNCHER_SCRIPT_NAME = "launch_mictlan_agrixgboost.py"
 ICON_RELATIVE_PATH = Path("icons") / "icon-app.svg"
+WINDOWS_SHORTCUT_ICON_SOURCE = Path("icons") / "icon_mictlan.png"
+WINDOWS_SHORTCUT_ICON_NAME = "icon_mictlan.ico"
 INSTALLER_STATE_NAME = "install_state.json"
 REQUIRED_APP_ENTRIES = [
     "__init__.py",
@@ -298,21 +302,27 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
     if existing_python is not None:
         version = python_version_tuple(existing_python)
         if version and version >= (3, 12):
+            venv_python = existing_python
             console_log(f"[installer] Reusing existing FeatureHero runtime at {venv_dir}")
-            return f"FeatureHero runtime detected at {venv_dir}."
-        console_log(f"[installer] Removing incompatible runtime at {venv_dir}")
-        shutil.rmtree(venv_dir, ignore_errors=True)
-    if not allow_create:
-        raise FileNotFoundError(
-            f"FeatureHero bundled runtime was not found in the installer payload: {venv_dir}"
-        )
+        else:
+            console_log(f"[installer] Removing incompatible runtime at {venv_dir}")
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            existing_python = None
+            venv_python = None
+    else:
+        venv_python = None
 
-    selected_python = python_exec or resolve_bootstrap_python()
-    console_log(f"[installer] Creating virtual environment with {selected_python}")
-    subprocess.run([selected_python, "-m", "venv", str(venv_dir)], check=True)
-    venv_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
     if venv_python is None:
-        raise FileNotFoundError(f"FeatureHero virtualenv Python was not created in: {venv_dir}")
+        if not allow_create:
+            raise FileNotFoundError(
+                f"FeatureHero bundled runtime was not found in the installer payload: {venv_dir}"
+            )
+        selected_python = python_exec or resolve_bootstrap_python()
+        console_log(f"[installer] Creating virtual environment with {selected_python}")
+        subprocess.run([selected_python, "-m", "venv", str(venv_dir)], check=True)
+        venv_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
+        if venv_python is None:
+            raise FileNotFoundError(f"FeatureHero virtualenv Python was not created in: {venv_dir}")
 
     console_log("[installer] Upgrading pip inside FeatureHero runtime")
     subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], check=True)
@@ -326,10 +336,10 @@ def windows_targets() -> list[Path]:
     desktop = home / "Desktop"
     start_menu = Path(os.environ.get("APPDATA", home)) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
     return [
-        desktop / WINDOWS_LAUNCHER_NAME,
-        start_menu / APP_NAME / WINDOWS_LAUNCHER_NAME,
-        desktop / WINDOWS_UNINSTALLER_NAME,
-        start_menu / APP_NAME / WINDOWS_UNINSTALLER_NAME,
+        desktop / WINDOWS_SHORTCUT_NAME,
+        start_menu / APP_NAME / WINDOWS_SHORTCUT_NAME,
+        desktop / WINDOWS_UNINSTALL_SHORTCUT_NAME,
+        start_menu / APP_NAME / WINDOWS_UNINSTALL_SHORTCUT_NAME,
     ]
 
 
@@ -357,6 +367,78 @@ def mac_targets() -> list[Path]:
 def write_windows_cmd(path: Path, command: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"@echo off\r\n{command}\r\n", encoding="utf-8")
+
+
+def resolve_windows_shortcut_python(python_exec: str) -> str:
+    candidate = Path(python_exec)
+    if candidate.name.lower() == "python.exe":
+        pythonw = candidate.with_name("pythonw.exe")
+        if pythonw.exists():
+            return str(pythonw)
+    return python_exec
+
+
+def export_windows_shortcut_icon(app_dir: Path, python_exec: str) -> Path | None:
+    source_icon = app_dir / WINDOWS_SHORTCUT_ICON_SOURCE
+    if not source_icon.exists():
+        return None
+    target_icon = app_dir / "icons" / WINDOWS_SHORTCUT_ICON_NAME
+    if target_icon.exists():
+        return target_icon
+    subprocess.run(
+        [
+            python_exec,
+            "-c",
+            (
+                "from pathlib import Path; from PIL import Image; "
+                "src = Path(__import__('sys').argv[1]); dst = Path(__import__('sys').argv[2]); "
+                "dst.parent.mkdir(parents=True, exist_ok=True); "
+                "Image.open(src).save(dst, format='ICO')"
+            ),
+            str(source_icon),
+            str(target_icon),
+        ],
+        check=True,
+    )
+    return target_icon if target_icon.exists() else None
+
+
+def _powershell_single_quote(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def write_windows_shortcut(
+    path: Path,
+    *,
+    target_path: str,
+    arguments: str = "",
+    working_directory: str = "",
+    icon_path: str = "",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    script_lines = [
+        "$WshShell = New-Object -ComObject WScript.Shell",
+        f"$Shortcut = $WshShell.CreateShortcut('{_powershell_single_quote(str(path))}')",
+        f"$Shortcut.TargetPath = '{_powershell_single_quote(target_path)}'",
+    ]
+    if arguments:
+        script_lines.append(f"$Shortcut.Arguments = '{_powershell_single_quote(arguments)}'")
+    if working_directory:
+        script_lines.append(f"$Shortcut.WorkingDirectory = '{_powershell_single_quote(working_directory)}'")
+    if icon_path:
+        script_lines.append(f"$Shortcut.IconLocation = '{_powershell_single_quote(icon_path)},0'")
+    script_lines.append("$Shortcut.Save()")
+    subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "; ".join(script_lines),
+        ],
+        check=True,
+    )
 
 
 def build_windows_python_command(python_exec: str, script_path: Path, *script_args: str) -> str:
@@ -574,6 +656,8 @@ def install_windows() -> str:
     uninstall_command = build_windows_python_command(launch_python, installer_script, "--uninstall")
     packaged_launcher = install_root / WINDOWS_LAUNCHER_NAME
     packaged_uninstaller = install_root / WINDOWS_UNINSTALLER_NAME
+    shortcut_python = resolve_windows_shortcut_python(launch_python)
+    shortcut_icon = export_windows_shortcut_icon(resolve_installed_app_dir(), launch_python)
 
     created_files: list[Path] = [install_root]
     console_log("[installer] Creating Windows shortcuts")
@@ -582,10 +666,22 @@ def install_windows() -> str:
     created_files.extend([packaged_launcher, packaged_uninstaller])
     targets = windows_targets()
     for path in targets[:2]:
-        write_windows_cmd(path, launch_command)
+        write_windows_shortcut(
+            path,
+            target_path=shortcut_python,
+            arguments=f'"{launch_script}"',
+            working_directory=str(installed_installers_dir),
+            icon_path=str(shortcut_icon) if shortcut_icon else "",
+        )
         created_files.append(path)
     for path in targets[2:]:
-        write_windows_cmd(path, uninstall_command)
+        write_windows_shortcut(
+            path,
+            target_path=shortcut_python,
+            arguments=f'"{installer_script}" --uninstall',
+            working_directory=str(installed_installers_dir),
+            icon_path=str(shortcut_icon) if shortcut_icon else "",
+        )
         created_files.append(path)
 
     save_state(created_files, install_root)
