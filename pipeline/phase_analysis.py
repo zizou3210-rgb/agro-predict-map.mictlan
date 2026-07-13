@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+import psutil
 
 from config_env import (
     get_featurehero_job_timeout_seconds,
@@ -73,17 +74,27 @@ def get_featurehero_params_json() -> str:
     return json.dumps(params, ensure_ascii=False)
 
 
+def is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return psutil.pid_exists(pid)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def wait_for_pid(pid: int, timeout_seconds: float | None = None) -> None:
     if timeout_seconds is None:
         timeout_seconds = float(get_featurehero_job_timeout_seconds())
     started_at = time.time()
     while True:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not is_pid_running(pid):
             return
-        except PermissionError:
-            pass
 
         if time.time() - started_at > timeout_seconds:
             raise TimeoutError(f"Timed out while waiting for FeatureHero job {pid}.")
@@ -499,12 +510,8 @@ def launch_featurehero(
     last_log_snapshot = ""
     last_message = ""
     while True:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not is_pid_running(pid):
             break
-        except PermissionError:
-            pass
 
         progress = read_status_progress(status_file)
         if progress is not None and progress != last_progress_snapshot:

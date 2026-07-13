@@ -30,6 +30,8 @@ import time
 import uuid
 import webbrowser
 import zipfile
+
+import psutil
 from functools import partial
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -244,6 +246,20 @@ def get_active_pipeline_job_count() -> int:
     return active_total
 
 
+def is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return psutil.pid_exists(pid)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def get_active_featurehero_jobs() -> dict[str, object]:
     featurehero_jobs: dict[str, object] = {}
     if FEATUREHERO_JOBS_FILE.exists():
@@ -258,12 +274,7 @@ def get_active_featurehero_jobs() -> dict[str, object]:
             pid = int(pid_text)
         except (TypeError, ValueError):
             continue
-        try:
-            os.kill(pid, 0)
-            active_featurehero_jobs[pid_text] = info
-        except ProcessLookupError:
-            continue
-        except PermissionError:
+        if is_pid_running(pid):
             active_featurehero_jobs[pid_text] = info
 
     if active_featurehero_jobs != featurehero_jobs:
@@ -2606,11 +2617,12 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             except (TypeError, ValueError):
                 continue
             try:
-                os.kill(pid, 15)
+                process = psutil.Process(pid)
+                process.terminate()
                 cancelled_featurehero_jobs += 1
-            except ProcessLookupError:
+            except psutil.NoSuchProcess:
                 continue
-            except PermissionError:
+            except psutil.AccessDenied:
                 active_featurehero_jobs[pid_text] = info
         try:
             FEATUREHERO_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
