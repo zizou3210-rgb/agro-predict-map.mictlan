@@ -171,6 +171,31 @@ def resolve_bundled_macos_python_pkg(app_dir: Path | None = None) -> Path:
     return base_app_dir / "python-installer" / "python-3.12.pkg"
 
 
+def resolve_bundled_python_command(app_dir: Path | None = None, platform_name: str | None = None) -> str | None:
+    base_app_dir = app_dir or resolve_installed_app_dir()
+    runtime_platform = platform_name or platform.system().lower()
+    candidates: list[Path] = []
+    if runtime_platform == "windows":
+        candidates = [
+            base_app_dir / "python-runtime" / "python.exe",
+            base_app_dir / "runtime" / "windows" / "python-runtime" / "python.exe",
+            base_app_dir / "python-runtime" / "python3.exe",
+        ]
+    elif runtime_platform == "linux":
+        candidates = [
+            base_app_dir / "python-runtime" / "bin" / "python3",
+            base_app_dir / "runtime" / "linux" / "python-runtime" / "bin" / "python3",
+            base_app_dir / "python-runtime" / "bin" / "python",
+        ]
+    else:
+        return None
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def iter_runtime_python_candidates(venv_dir: Path) -> list[Path]:
     return [
         venv_dir / "bin" / "python3",
