@@ -3,6 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 set "SCRIPT="
+set "PYTHON_CMD="
 set "CANDIDATE1=%~dp0desktop_installer.py"
 set "CANDIDATE2=%~dp0installers\desktop_installer.py"
 
@@ -30,25 +31,25 @@ if not defined SCRIPT (
   exit /b 1
 )
 
+for /f "delims=" %%I in ('where python.exe 2^>nul') do (
+  set "PYTHON_CMD=%%I"
+  goto python_found
+)
+for /f "delims=" %%I in ('where py.exe 2^>nul') do (
+  set "PYTHON_CMD=%%I"
+  goto python_found
+)
+
+if not defined PYTHON_CMD (
+  echo [installer] ERROR: Python no esta disponible en este sistema.
+  pause
+  exit /b 1
+)
+
+:python_found
 echo [installer] Using script: %SCRIPT%
-
-where py >nul 2>nul
-if %ERRORLEVEL%==0 (
-  echo [installer] Launching installer with py...
-  py -3 "%SCRIPT%" --install
-  goto end
-)
-
-where python >nul 2>nul
-if %ERRORLEVEL%==0 (
-  echo [installer] Launching installer with python...
-  python "%SCRIPT%" --install
-  goto end
-)
-
-echo [installer] ERROR: Python no esta disponible en este sistema.
-pause
-exit /b 1
+echo [installer] Using Python: %PYTHON_CMD%
+"%PYTHON_CMD%" "%SCRIPT%" --install
 
 :end
 set EXITCODE=%ERRORLEVEL%
