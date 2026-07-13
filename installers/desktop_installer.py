@@ -385,9 +385,14 @@ def export_windows_shortcut_icon(app_dir: Path, python_exec: str) -> Path | None
     target_icon = app_dir / "icons" / WINDOWS_SHORTCUT_ICON_NAME
     if target_icon.exists():
         return target_icon
+    runtime_python = next(
+        (candidate for candidate in iter_runtime_python_candidates(resolve_featurehero_runtime_dir(app_dir)) if candidate.exists()),
+        None,
+    )
+    image_python = str(runtime_python) if runtime_python is not None else python_exec
     subprocess.run(
         [
-            python_exec,
+            image_python,
             "-c",
             (
                 "from pathlib import Path; from PIL import Image; "
