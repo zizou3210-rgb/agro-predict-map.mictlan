@@ -315,13 +315,16 @@ def handle_run_action(args: argparse.Namespace):
         ]
 
         try:
-            # Detach the process from the current terminal
+            # Detach the process from the current terminal.
+            # On Windows, DETACHED_PROCESS has been unreliable with some
+            # bundled Python runtimes and can raise WinError 87.
             popen_kwargs = {
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
+                "stdin": subprocess.DEVNULL,
             }
             if os.name == 'nt':  # Windows
-                popen_kwargs['creationflags'] = subprocess.DETACHED_PROCESS
+                popen_kwargs['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             else:  # POSIX
                 popen_kwargs['start_new_session'] = True
 
