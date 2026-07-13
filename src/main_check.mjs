@@ -862,7 +862,7 @@ const setLegendState = (renderFlowMode = currentRenderedFlowMode) => {
     }
     legendDot.style.background = "#245c9f";
     legendDot.style.boxShadow = "0 0 0 3px rgba(36, 92, 159, 0.16)";
-    legendLabel.textContent = "Predicted Grain Yield";
+    legendLabel.textContent = `Predicted ${getObservedTargetColumnLabel()}`;
     return;
   }
   legendDot.style.background = "#2f9e44";
@@ -2424,7 +2424,7 @@ const refreshSavedModels = async () => {
       } else if (isPredictionWorkflowMode()) {
         const placeholderOption = document.createElement("option");
         placeholderOption.value = "";
-        placeholderOption.textContent = "Select saved Grain Yield model";
+        placeholderOption.textContent = `Select saved ${getObservedTargetColumnLabel()} model`;
         savedModelSelect.append(placeholderOption);
 
         savedModelsCache.forEach((model) => {
@@ -4875,16 +4875,112 @@ const asFloat = (value) => {
   return Number.isFinite(numeric) ? numeric : null;
 };
 
+const hasOwnProperty = (object, key) =>
+  !!object && Object.prototype.hasOwnProperty.call(object, key);
+
+const getConfiguredTargetColumn = () => {
+  const candidates = [
+    selectionPropertiesState?.targetColumn,
+    datasetStore?.prediction?.summary?.target_column,
+    datasetStore?.training?.summary?.target_column,
+    datasetStore?.top_germplasm?.summary?.target_column,
+    datasetStore?.original?.summary?.target_column,
+  ];
+  for (const candidate of candidates) {
+    const normalized = String(candidate ?? "").trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return actualYieldKey;
+};
+
+const getConfiguredPredictedTargetColumn = () => {
+  const targetColumn = getConfiguredTargetColumn();
+  const candidates = [
+    datasetStore?.prediction?.summary?.target_predicted_column,
+    datasetStore?.training?.summary?.target_predicted_column,
+    datasetStore?.top_germplasm?.summary?.target_predicted_column,
+    targetColumn ? `${targetColumn} predicted` : "",
+    predictedYieldKey,
+  ];
+  for (const candidate of candidates) {
+    const normalized = String(candidate ?? "").trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return predictedYieldKey;
+};
+
+const getObservedTargetColumnKey = (properties = null) => {
+  const configured = getConfiguredTargetColumn();
+  const candidates = [configured, actualYieldKey];
+  for (const candidate of candidates) {
+    if (candidate && hasOwnProperty(properties, candidate)) {
+      return candidate;
+    }
+  }
+  const inferred = Object.keys(properties ?? {}).find((key) => {
+    const normalized = String(key ?? "").trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+    if (normalized.includes("predicted") || normalized.includes("prediction mean")) {
+      return false;
+    }
+    return normalized.includes("yield") || normalized === "target";
+  });
+  return inferred || configured || actualYieldKey;
+};
+
+const getPredictedTargetColumnKey = (properties = null) => {
+  const configured = getConfiguredPredictedTargetColumn();
+  const observedKey = getObservedTargetColumnKey(properties);
+  const candidates = [
+    configured,
+    observedKey ? `${observedKey} predicted` : "",
+    predictedYieldKey,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && hasOwnProperty(properties, candidate)) {
+      return candidate;
+    }
+  }
+  const inferred = Object.keys(properties ?? {}).find((key) => {
+    const normalized = String(key ?? "").trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+    return normalized.includes("predicted") || normalized.includes("prediction mean");
+  });
+  return inferred || configured || predictedYieldKey;
+};
+
+const getObservedTargetValue = (properties = null) =>
+  properties?.[getObservedTargetColumnKey(properties)];
+
+const getPredictedTargetValue = (properties = null) =>
+  properties?.[getPredictedTargetColumnKey(properties)];
+
+const getObservedTargetColumnLabel = () => getConfiguredTargetColumn() || "Target";
+
+const getPredictedTargetColumnLabel = ({ training = false } = {}) =>
+  training
+    ? `${getObservedTargetColumnLabel()} Predicted Training`
+    : getConfiguredPredictedTargetColumn();
+
+
 const getYieldDifference = (properties) => {
   const mean = predictedYieldStats?.mean;
-  const predicted = asFloat(properties?.[predictedYieldKey]);
+  const predicted = asFloat(getPredictedTargetValue(properties));
   if (isSavedModelRenderMode()) {
     if (!Number.isFinite(mean) || predicted === null) {
       return null;
     }
     return mean - predicted;
   }
-  const actual = asFloat(properties?.[actualYieldKey]);
+  const actual = asFloat(getObservedTargetValue(properties));
   if (actual === null || predicted === null) {
     return null;
   }
@@ -4899,8 +4995,8 @@ const formatYieldDifference = (value) => {
 };
 
 const getAutomaticFlowMarkerColor = (feature) => {
-  const actual = asFloat(feature?.properties?.[actualYieldKey]);
-  const predicted = asFloat(feature?.properties?.[predictedYieldKey]);
+  const actual = asFloat(getObservedTargetValue(feature?.properties));
+  const predicted = asFloat(getPredictedTargetValue(feature?.properties));
   if (actual === null || predicted === null) {
     return "#c7512e";
   }
@@ -4953,7 +5049,7 @@ const getMarkerColor = (feature) => {
   if (isCategoricalPredictionColorMode()) {
     return getPredictionProfileColor(getPredictionCategoryLabelForFeature(feature));
   }
-  return getSavedModelPredictedColor(feature?.properties?.[predictedYieldKey]);
+  return getSavedModelPredictedColor(getPredictedTargetValue(feature?.properties));
 };
 
 const toMarkerColorAlpha = (color, alpha) => {
@@ -5054,7 +5150,7 @@ const getBestFeatureForProfileLabel = (profileLabel) => {
     if (featureLabel !== normalizedLabel) {
       return;
     }
-    const predictedValue = asFloat(feature?.properties?.[predictedYieldKey]);
+    const predictedValue = asFloat(getPredictedTargetValue(feature?.properties));
     if (!Number.isFinite(predictedValue)) {
       if (!bestFeature) {
         bestFeature = feature;
@@ -5078,7 +5174,7 @@ const getBestPredictionCategoryLabelByMean = () => {
   const groupedValues = new Map();
   candidateFeatures.forEach((feature) => {
     const label = getPredictionCategoryLabelForFeature(feature);
-    const predictedValue = asFloat(feature?.properties?.[predictedYieldKey]);
+    const predictedValue = asFloat(getPredictedTargetValue(feature?.properties));
     if (!label || !Number.isFinite(predictedValue)) {
       return;
     }
@@ -5175,25 +5271,25 @@ const buildTrainingColorHelpItems = () => [
     color: "#8f1d1d",
     label: "High deviation",
     tooltip:
-      "High deviation: the predicted grain yield differs strongly from the observed grain yield and clearly exceeds the mean absolute error range.",
+      `High deviation: the predicted values for ${getObservedTargetColumnLabel()} differ strongly from the observed values for ${getObservedTargetColumnLabel()} and clearly exceed the mean absolute error range.`,
   },
   {
     color: "#d46a6a",
     label: "Moderate deviation",
     tooltip:
-      "Moderate deviation: the predicted grain yield is outside the mean absolute error range, but not by a large margin.",
+      `Moderate deviation: the predicted values for ${getObservedTargetColumnLabel()} are outside the mean absolute error range, but not by a large margin.`,
   },
   {
     color: "#8eb8e5",
     label: "Close fit",
     tooltip:
-      "Close fit: the predicted grain yield remains within the mean absolute error range, but with a larger gap than the darkest blue markers.",
+      `Close fit: the predicted values for ${getObservedTargetColumnLabel()} remain within the mean absolute error range, but with a larger gap than the darkest blue markers.`,
   },
   {
     color: "#245c9f",
     label: "Very close fit",
     tooltip:
-      "Very close fit: the predicted grain yield is very close to the observed grain yield and well within the mean absolute error range.",
+      `Very close fit: the predicted values for ${getObservedTargetColumnLabel()} are very close to the observed values for ${getObservedTargetColumnLabel()} and well within the mean absolute error range.`,
   },
 ];
 
@@ -5202,25 +5298,25 @@ const buildSavedModelColorHelpItems = () => [
     color: "#8f1d1d",
     label: "Lower prediction",
     tooltip:
-      "Lower prediction: this marker belongs to the lower end of predicted grain yield values in the current prediction run.",
+      `Lower prediction: this marker belongs to the lower end of predicted ${getObservedTargetColumnLabel()} values in the current prediction run.`,
   },
   {
     color: "#d46a6a",
     label: "Lower-mid prediction",
     tooltip:
-      "Lower-mid prediction: this marker belongs to the lower-middle predicted grain yield range in the current prediction run.",
+      `Lower-mid prediction: this marker belongs to the lower-middle predicted ${getObservedTargetColumnLabel()} range in the current prediction run.`,
   },
   {
     color: "#8eb8e5",
     label: "Higher prediction",
     tooltip:
-      "Higher prediction: this marker belongs to the upper end of predicted grain yield values in the current prediction run.",
+      `Higher prediction: this marker belongs to the upper end of predicted ${getObservedTargetColumnLabel()} values in the current prediction run.`,
   },
   {
     color: "#245c9f",
     label: "Upper-mid prediction",
     tooltip:
-      "Upper-mid prediction: this marker belongs to the upper-middle predicted grain yield range in the current prediction run.",
+      `Upper-mid prediction: this marker belongs to the upper-middle predicted ${getObservedTargetColumnLabel()} range in the current prediction run.`,
   },
 ];
 
@@ -5327,53 +5423,85 @@ const getPagedAttributes = (feature) => {
   return entries;
 };
 
-const showTooltip = (event, feature) => {
-  const { properties } = feature;
-  const [longitude, latitude] = feature.geometry.coordinates;
-  const yieldDifference = getYieldDifference(properties);
-  const projectedName = getProjectedSelectedGermplasmName(properties.Name);
-  const title = projectedName || properties.idPK || `Row ${properties.row_number}`;
-  const grainYieldLine = isSavedModelRenderMode()
-    ? ""
-    : `<p>Grain Yield: ${formatAttributeValue(properties[actualYieldKey])}</p>`;
-  const nameLine = isOriginalDataRenderMode()
-    ? `<p>Name: ${formatAttributeValue(projectedName || properties.Name)}</p>`
-    : "";
-  const germplasmLine = isMultiGermplasmPredictionResult() && properties?.Name
-    ? `<p>Selected germplasm: ${formatAttributeValue(properties.Name)}</p>`
-    : "";
-  const profileLine = isMultiProfilePredictionResult() && properties?.[predictionProfileLabelKey]
-    ? `<p>Prediction profile: ${formatAttributeValue(getPredictionProfileDisplayLabel(properties[predictionProfileLabelKey]))}</p>`
-    : "";
-  const predictedLine = isOriginalDataRenderMode()
-    ? ""
-    : isSavedModelRenderMode()
-      ? `<p>Grain Yield predicted: ${formatAttributeValue(properties[predictedYieldKey])}</p>`
-      : `<p>Grain Yield Predicted Training: ${formatAttributeValue(properties[predictedYieldKey])}</p>`;
-  const predictionDifferenceLine = isOriginalDataRenderMode()
-    ? ""
-    : `<p>Prediction difference: ${formatYieldDifference(yieldDifference)}</p>`;
-  const showCoordinates = !(activeDataViewTab === "original" || activeDataViewTab === "training" || activeDataViewTab === "prediction");
-  const showCountry = !(activeDataViewTab === "original" || activeDataViewTab === "training" || activeDataViewTab === "prediction");
-  const showRank = activeDataViewTab !== "original";
-  tooltip.hidden = false;
-  tooltip.innerHTML = `
-    <strong>${title}</strong>
-    ${grainYieldLine}
-    ${nameLine}
-    ${germplasmLine}
-    ${profileLine}
-    ${predictedLine}
-    ${predictionDifferenceLine}
-    ${showCoordinates ? `<p>Latitude: ${formatCoordinate(latitude)}</p>` : ""}
-    ${showCoordinates ? `<p>Longitude: ${formatCoordinate(longitude)}</p>` : ""}
-    ${showCountry && properties.Country ? `<p>Country: ${properties.Country}</p>` : ""}
-    ${showRank && properties.Rank ? `<p>Rank: ${properties.Rank}</p>` : ""}
-  `;
+const positionTooltip = (event) => {
+  const container = mapFrame ?? svg.node()?.parentElement;
+  if (!container) {
+    return;
+  }
+  const bounds = container.getBoundingClientRect();
+  const tooltipWidth = tooltip.offsetWidth || 260;
+  const tooltipHeight = tooltip.offsetHeight || 120;
+  const offsetX = 18;
+  const offsetY = 12;
+  const maxLeft = Math.max(bounds.width - tooltipWidth - 12, 12);
+  const maxTop = Math.max(bounds.height - tooltipHeight - 12, 12);
+  const nextLeft = Math.min(Math.max(event.clientX - bounds.left + offsetX, 12), maxLeft);
+  const nextTop = Math.min(Math.max(event.clientY - bounds.top - offsetY, 12), maxTop);
+  tooltip.style.left = `${nextLeft}px`;
+  tooltip.style.top = `${nextTop}px`;
+};
 
-  const bounds = svg.node().getBoundingClientRect();
-  tooltip.style.left = `${event.clientX - bounds.left}px`;
-  tooltip.style.top = `${event.clientY - bounds.top}px`;
+const showTooltip = (event, feature) => {
+  try {
+    const properties = feature?.properties ?? {};
+    const coordinates = Array.isArray(feature?.geometry?.coordinates)
+      ? feature.geometry.coordinates
+      : [];
+    const longitude = coordinates.length > 0 ? coordinates[0] : null;
+    const latitude = coordinates.length > 1 ? coordinates[1] : null;
+    const yieldDifference = getYieldDifference(properties);
+    const projectedName = getProjectedSelectedGermplasmName(properties.Name);
+    const title = projectedName || properties.idPK || `Row ${properties.row_number ?? "N/A"}`;
+    const observedLabel = escapeHtml(getObservedTargetColumnLabel() || "Target");
+    const predictedLabel = escapeHtml(getPredictedTargetColumnLabel() || "Target predicted");
+    const trainingPredictedLabel = escapeHtml(
+      getPredictedTargetColumnLabel({ training: true }) || "Target Predicted Training",
+    );
+    const grainYieldLine = isSavedModelRenderMode()
+      ? ""
+      : `<p>${observedLabel}: ${formatAttributeValue(getObservedTargetValue(properties))}</p>`;
+    const nameLine = isOriginalDataRenderMode()
+      ? `<p>Name: ${formatAttributeValue(projectedName || properties.Name)}</p>`
+      : "";
+    const germplasmLine = isMultiGermplasmPredictionResult() && properties?.Name
+      ? `<p>Selected germplasm: ${formatAttributeValue(properties.Name)}</p>`
+      : "";
+    const profileLine = isMultiProfilePredictionResult() && properties?.[predictionProfileLabelKey]
+      ? `<p>Prediction profile: ${formatAttributeValue(getPredictionProfileDisplayLabel(properties[predictionProfileLabelKey]))}</p>`
+      : "";
+    const predictedLine = isOriginalDataRenderMode()
+      ? ""
+      : isSavedModelRenderMode()
+        ? `<p>${predictedLabel}: ${formatAttributeValue(getPredictedTargetValue(properties))}</p>`
+        : `<p>${trainingPredictedLabel}: ${formatAttributeValue(getPredictedTargetValue(properties))}</p>`;
+    const predictionDifferenceLine = isOriginalDataRenderMode()
+      ? ""
+      : `<p>Prediction difference: ${formatYieldDifference(yieldDifference)}</p>`;
+    const showCoordinates = !(activeDataViewTab === "original" || activeDataViewTab === "training" || activeDataViewTab === "prediction");
+    const showCountry = !(activeDataViewTab === "original" || activeDataViewTab === "training" || activeDataViewTab === "prediction");
+    const showRank = activeDataViewTab !== "original";
+    tooltip.hidden = false;
+    tooltip.innerHTML = `
+      <strong>${escapeHtml(title)}</strong>
+      ${grainYieldLine}
+      ${nameLine}
+      ${germplasmLine}
+      ${profileLine}
+      ${predictedLine}
+      ${predictionDifferenceLine}
+      ${showCoordinates && latitude !== null ? `<p>Latitude: ${formatCoordinate(latitude)}</p>` : ""}
+      ${showCoordinates && longitude !== null ? `<p>Longitude: ${formatCoordinate(longitude)}</p>` : ""}
+      ${showCountry && properties.Country ? `<p>Country: ${escapeHtml(properties.Country)}</p>` : ""}
+      ${showRank && properties.Rank ? `<p>Rank: ${formatAttributeValue(properties.Rank)}</p>` : ""}
+    `;
+
+    positionTooltip(event);
+  } catch (error) {
+    console.error("Tooltip render error", error);
+    tooltip.hidden = false;
+    tooltip.innerHTML = `<strong>Record</strong><p>Tooltip data unavailable.</p>`;
+    positionTooltip(event);
+  }
 };
 
 const hideTooltip = () => {
@@ -5530,12 +5658,12 @@ const renderDetails = () => {
   const metaChips = [
     `Country: ${selectedFeature.properties.Country ?? "No data"}`,
     isSavedModelRenderMode()
-      ? `Grain Yield Prediction Mean: ${getPredictedMeanLabel()}`
-      : `Grain Yield: ${formatAttributeValue(selectedFeature.properties[actualYieldKey])}`,
+      ? `${getObservedTargetColumnLabel()} Prediction Mean: ${getPredictedMeanLabel()}`
+      : `${getObservedTargetColumnLabel()}: ${formatAttributeValue(getObservedTargetValue(selectedFeature.properties))}`,
   ];
   if (!isOriginalDataRenderMode()) {
     metaChips.push(
-      `Grain Yield predicted: ${formatAttributeValue(selectedFeature.properties[predictedYieldKey])}`,
+      `${getPredictedTargetColumnLabel()}: ${formatAttributeValue(getPredictedTargetValue(selectedFeature.properties))}`,
       `Prediction difference: ${formatYieldDifference(yieldDifference)}`,
     );
   }
@@ -6167,7 +6295,7 @@ const buildManualGridPredictedLookup = (gridCells) => {
   const valuesByCell = new Map();
   predictionFeatures.forEach((feature) => {
     const gridCellId = findManualGridCellIdForFeature(feature, normalizedGridCells);
-    const predictedValue = asFloat(feature?.properties?.[predictedYieldKey]);
+    const predictedValue = asFloat(getPredictedTargetValue(feature?.properties));
     if (!gridCellId || predictedValue === null) {
       return;
     }
@@ -6192,7 +6320,7 @@ const buildManualGridWinningFeatureLookup = (gridCells) => {
   const winners = new Map();
   predictionFeatures.forEach((feature) => {
     const gridCellId = findManualGridCellIdForFeature(feature, normalizedGridCells);
-    const predictedValue = asFloat(feature?.properties?.[predictedYieldKey]);
+    const predictedValue = asFloat(getPredictedTargetValue(feature?.properties));
     if (!gridCellId || predictedValue === null) {
       return;
     }
@@ -6219,7 +6347,7 @@ const buildManualGridProfileFeatureLookup = (gridCells, profileLabel) => {
       return;
     }
     const gridCellId = findManualGridCellIdForFeature(feature, normalizedGridCells);
-    const predictedValue = asFloat(feature?.properties?.[predictedYieldKey]);
+    const predictedValue = asFloat(getPredictedTargetValue(feature?.properties));
     if (!gridCellId) {
       return;
     }
@@ -6761,12 +6889,12 @@ const applyFeatureCollection = async (
   const longitudes = points.map((feature) => feature.geometry.coordinates[0]);
   const latitudes = points.map((feature) => feature.geometry.coordinates[1]);
   const predictedValues = points
-    .map((feature) => asFloat(feature.properties?.[predictedYieldKey]))
+    .map((feature) => asFloat(getPredictedTargetValue(feature.properties)))
     .filter((value) => value !== null);
   const absoluteErrors = points
     .map((feature) => {
-      const actual = asFloat(feature?.properties?.[actualYieldKey]);
-      const predicted = asFloat(feature?.properties?.[predictedYieldKey]);
+      const actual = asFloat(getObservedTargetValue(feature?.properties));
+      const predicted = asFloat(getPredictedTargetValue(feature?.properties));
       if (actual === null || predicted === null) {
         return null;
       }
@@ -6821,6 +6949,7 @@ const applyFeatureCollection = async (
     .data(showPointMarkers ? points : [])
     .join("g")
     .attr("class", "point")
+    .style("pointer-events", "all")
     .on("mouseenter", (event, feature) => showTooltip(event, feature))
     .on("mousemove", (event, feature) => showTooltip(event, feature))
     .on("mouseleave", hideTooltip)
@@ -6832,9 +6961,10 @@ const applyFeatureCollection = async (
     .append("path")
     .attr("class", "marker-pin")
     .attr("d", markerPath)
-    .style("fill", (feature) => getMarkerColor(feature));
+    .style("fill", (feature) => getMarkerColor(feature))
+    .style("pointer-events", "all");
   if (!(renderFlowMode === "saved_model" && activeDataViewTab === "prediction" && datasetStore.prediction?.summary?.climate_scope === "regional_manual")) {
-    markerGroups.append("circle").attr("class", "marker-center").attr("r", 2.6).attr("cy", -2.5);
+    markerGroups.append("circle").attr("class", "marker-center").attr("r", 2.6).attr("cy", -2.5).style("pointer-events", "all");
   }
   mapContext.markerGroups = markerGroups;
 
