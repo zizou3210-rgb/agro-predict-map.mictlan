@@ -21,6 +21,8 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local desktop runti
 
 APP_NAME = "Mictlan-AgriXGBoost"
 PACKAGE_DIR_NAME = "cimmyt_app"
+WINDOWS_LAUNCHER_NAME = f"{APP_NAME}.cmd"
+WINDOWS_UNINSTALLER_NAME = f"Desinstalar {APP_NAME}.cmd"
 INSTALLERS_DIR = Path(__file__).resolve().parent
 APP_DIR = INSTALLERS_DIR.parent
 ROOT_DIR = APP_DIR.parent
@@ -324,10 +326,10 @@ def windows_targets() -> list[Path]:
     desktop = home / "Desktop"
     start_menu = Path(os.environ.get("APPDATA", home)) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
     return [
-        desktop / f"{APP_NAME}.cmd",
-        start_menu / APP_NAME / f"{APP_NAME}.cmd",
-        desktop / f"Desinstalar {APP_NAME}.cmd",
-        start_menu / APP_NAME / f"Desinstalar {APP_NAME}.cmd",
+        desktop / WINDOWS_LAUNCHER_NAME,
+        start_menu / APP_NAME / WINDOWS_LAUNCHER_NAME,
+        desktop / WINDOWS_UNINSTALLER_NAME,
+        start_menu / APP_NAME / WINDOWS_UNINSTALLER_NAME,
     ]
 
 
@@ -355,6 +357,13 @@ def mac_targets() -> list[Path]:
 def write_windows_cmd(path: Path, command: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"@echo off\r\n{command}\r\n", encoding="utf-8")
+
+
+def build_windows_python_command(python_exec: str, script_path: Path, *script_args: str) -> str:
+    quoted_args = " ".join(f'"{arg}"' for arg in script_args)
+    if quoted_args:
+        return f'"{python_exec}" "{script_path}" {quoted_args}'
+    return f'"{python_exec}" "{script_path}"'
 
 
 def write_shell_launcher(path: Path, command: str) -> None:
@@ -560,11 +569,17 @@ def install_windows() -> str:
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
-    launch_command = f'start "" "{python_launcher()}" "{launch_script}"'
-    uninstall_command = f'start "" "{python_launcher()}" "{installer_script}" --uninstall'
+    launch_python = bundled_python or python_launcher()
+    launch_command = build_windows_python_command(launch_python, launch_script)
+    uninstall_command = build_windows_python_command(launch_python, installer_script, "--uninstall")
+    packaged_launcher = install_root / WINDOWS_LAUNCHER_NAME
+    packaged_uninstaller = install_root / WINDOWS_UNINSTALLER_NAME
 
     created_files: list[Path] = [install_root]
     console_log("[installer] Creating Windows shortcuts")
+    write_windows_cmd(packaged_launcher, launch_command)
+    write_windows_cmd(packaged_uninstaller, uninstall_command)
+    created_files.extend([packaged_launcher, packaged_uninstaller])
     targets = windows_targets()
     for path in targets[:2]:
         write_windows_cmd(path, launch_command)
@@ -575,9 +590,16 @@ def install_windows() -> str:
 
     save_state(created_files, install_root)
     console_log("[installer] Installation state saved")
+    console_log("[installer] Launching app after installation")
+    subprocess.Popen(
+        [launch_python, str(launch_script)],
+        cwd=str(installed_installers_dir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     return (
         "Instalacion completada en Windows. "
-        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los accesos. "
+        f"Se actualizo la snapshot local con {len(copied_entries)} componentes, se creo el lanzador local y se recrearon los accesos. "
         f"{runtime_message}"
     )
 
