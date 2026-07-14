@@ -31,7 +31,6 @@ import uuid
 import webbrowser
 import zipfile
 
-import psutil
 from functools import partial
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -250,7 +249,16 @@ def is_pid_running(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        return psutil.pid_exists(pid)
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            process = kernel32.OpenProcess(0x1000, False, pid)
+            if not process:
+                return False
+            kernel32.CloseHandle(process)
+            return True
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -258,6 +266,29 @@ def is_pid_running(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+
+
+def terminate_pid(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            process = kernel32.OpenProcess(0x0001, False, pid)
+            if not process:
+                return False
+            try:
+                return bool(kernel32.TerminateProcess(process, 1))
+            finally:
+                kernel32.CloseHandle(process)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 15)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
 
 
 def get_active_featurehero_jobs() -> dict[str, object]:
@@ -2616,13 +2647,9 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
                 pid = int(pid_text)
             except (TypeError, ValueError):
                 continue
-            try:
-                process = psutil.Process(pid)
-                process.terminate()
+            if terminate_pid(pid):
                 cancelled_featurehero_jobs += 1
-            except psutil.NoSuchProcess:
-                continue
-            except psutil.AccessDenied:
+            elif is_pid_running(pid):
                 active_featurehero_jobs[pid_text] = info
         try:
             FEATUREHERO_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
