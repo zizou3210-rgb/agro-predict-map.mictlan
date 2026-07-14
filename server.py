@@ -94,11 +94,15 @@ FEATUREHERO_DIR = APP_DIR / "resources" / "featurehero"
 PIPELINE_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL")
 
 def get_preferred_pipeline_pythons() -> list[Path | None]:
+    featurehero_venv = APP_DIR / "resources" / "featurehero" / ".venv"
     return [
         Path(os.environ.get("APP_PIPELINE_PYTHON", "")).expanduser()
         if os.environ.get("APP_PIPELINE_PYTHON")
         else None,
-        APP_DIR / "resources" / "featurehero" / ".venv" / "bin" / "python",
+        featurehero_venv / "Scripts" / "python.exe",
+        featurehero_venv / "Scripts" / "python3.exe",
+        featurehero_venv / "bin" / "python",
+        featurehero_venv / "bin" / "python3",
         Path(sys.executable).resolve(),
     ]
 
