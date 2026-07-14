@@ -7,11 +7,11 @@ from pathlib import Path
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from cimmyt_app.pipeline.phase2 import run_phase2
-from cimmyt_app.pipeline.phase3 import run_phase3
-from cimmyt_app.pipeline.phase4 import run_phase4
-from cimmyt_app.pipeline.phase5 import run_phase5
-from cimmyt_app.pipeline.common import GERMPLASM_COLUMNS
+from pipeline.phase2 import run_phase2
+from pipeline.phase3 import run_phase3
+from pipeline.phase4 import run_phase4
+from pipeline.phase5 import run_phase5
+from pipeline.common import GERMPLASM_COLUMNS
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]

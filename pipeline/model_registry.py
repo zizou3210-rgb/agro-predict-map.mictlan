@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-MODELS_DIR = ROOT_DIR / "cimmyt_app" / "pipeline" / "model"
+ROOT_DIR = Path(__file__).resolve().parents[1]
+MODELS_DIR = ROOT_DIR / "pipeline" / "model"
 MODEL_METADATA_FILE = "metadata.json"
 
 

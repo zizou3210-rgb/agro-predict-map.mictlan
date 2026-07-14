@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parents[2]
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -16,6 +16,7 @@ import json
 import math
 import os
 import shutil
+import ssl
 import sys
 import time
 from collections import OrderedDict
@@ -27,10 +28,14 @@ from threading import Lock, RLock
 from typing import Callable
 from urllib.request import Request, urlopen
 
+try:
+    import certifi
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
+    certifi = None
 from PIL import Image
 
-from cimmyt_app.preprocess import ea_pipeline, soil_enrichment
-from cimmyt_app.pipeline.nasa_country_region import build_manual_grid_cells
+from preprocess import ea_pipeline, soil_enrichment
+from pipeline.nasa_country_region import build_manual_grid_cells
 
 PHASE01_SCRIPT = Path(__file__).resolve().parents[1] / "phase01" / "phase1.py"
 SOIL_TEXTURE_HEADER = soil_enrichment.SOIL_TEXTURE_HEADER
@@ -200,6 +205,23 @@ def resolve_shared_chc_cache_dir() -> Path:
     return resolve_runtime_root() / "cache" / "chc_climate"
 
 
+def resolve_phase03_worker_limit(kind: str, series_total: int) -> int:
+    env_name = "APP_PHASE03_PREFETCH_MAX_WORKERS" if kind == "prefetch" else "APP_PHASE03_COMPUTE_MAX_WORKERS"
+    raw_value = str(os.environ.get(env_name, "")).strip()
+    if raw_value:
+        try:
+            configured = max(1, int(raw_value))
+        except ValueError:
+            configured = 1
+        return max(1, min(configured, max(series_total, 1)))
+
+    if sys.platform == "darwin":
+        default_limit = 2 if kind == "prefetch" else 1
+    else:
+        default_limit = 6 if kind == "prefetch" else 4
+    return max(1, min(default_limit, max(series_total, 1)))
+
+
 def resolve_chc_pixel_metadata(latitude: float, longitude: float) -> tuple[str, float, float]:
     clamped_latitude = min(max(latitude, -89.999999), 89.999999)
     clamped_longitude = min(max(longitude, -179.999999), 179.999999)
@@ -295,12 +317,19 @@ def _resolve_raster_request(dataset: str, current_date: date, cache_dir: Path) -
     return dataset_dir / filename, url
 
 
+def _build_ssl_context() -> ssl.SSLContext:
+    if certifi is not None:
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
+
+
 def _download_with_retries(url: str, target_path: Path) -> None:
     last_error: Exception | None = None
     request = Request(url, headers={"User-Agent": "cimmyt_app ce_pipeline climate"})
+    ssl_context = _build_ssl_context()
     for attempt in range(1, ea_pipeline.MAX_RETRIES + 1):
         try:
-            with urlopen(request, timeout=ea_pipeline.HTTP_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=ea_pipeline.HTTP_TIMEOUT_SECONDS, context=ssl_context) as response:
                 payload = response.read()
             target_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path = target_path.with_suffix(target_path.suffix + '.tmp')
@@ -558,7 +587,8 @@ def prefetch_chc_rasters(
         _download_with_retries(url, target_path)
         return target_path, True
 
-    worker_count = max(1, min(max_workers, total_tasks))
+    configured_workers = resolve_phase03_worker_limit("prefetch", total_tasks)
+    worker_count = max(1, min(max_workers, configured_workers, total_tasks))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_map = {executor.submit(resolve_task, dataset, current_date): (dataset, current_date) for dataset, current_date in task_specs}
         for future in as_completed(future_map):
@@ -1060,6 +1090,7 @@ def build_phase02_records_parallel_workspace(
     progress_callback: ProgressCallback | None,
     skip_soil_enrichment: bool,
     climate_override: dict[str, object] | None = None,
+    target_column: str = ea_pipeline.YIELD_HEADER,
 ) -> tuple[list[str], list[dict[str, object]], dict[str, object]]:
     output_dir = ea_pipeline.PHASE_DIRS["phase02"]
     locality_metadata: dict[str, object] = {}
@@ -1165,7 +1196,7 @@ def build_phase02_records_parallel_workspace(
         }
         return series_key, output_row, audit_row, local_stats
 
-    worker_count = max(2, min(4, total_unique_series)) if total_unique_series > 1 else 1
+    worker_count = resolve_phase03_worker_limit("compute", total_unique_series) if total_unique_series > 1 else 1
     configure_parallel_progress_context(
         progress_file=progress_file,
         progress_callback=progress_callback,
@@ -1251,9 +1282,9 @@ def build_phase02_records_parallel_workspace(
     }
 
     phase02_headers = (
-        ea_pipeline.build_country_locality_phase02_headers(headers)
+        ea_pipeline.build_country_locality_phase02_headers(headers, target_header=target_column)
         if locality_mode
-        else ea_pipeline.build_phase02_headers(headers)
+        else ea_pipeline.build_phase02_headers(headers, target_header=target_column)
     )
     phase02_records: list[dict[str, object]] = []
     matched_rows = 0
@@ -1423,6 +1454,7 @@ def create_phase03_workbook(
     if not headers:
         raise ValueError("The phase02 workbook is empty.")
     original_input_row_count = len(records)
+    target_column = str(initial_settings.get("target_column", "")).strip() or ea_pipeline.YIELD_HEADER
     records, normalized_date_stats = normalize_phase02_dates(records, initial_settings)
     headers, records = apply_initial_settings_aliases(headers, records, initial_settings)
     headers, records, merge_cleanup_metadata = prepare_ce_row_merge_keys(headers, records)
@@ -1670,6 +1702,7 @@ def create_phase03_workbook(
                 progress_callback=progress_callback,
                 skip_soil_enrichment=skip_soil_enrichment,
                 climate_override=climate_override,
+                target_column=target_column,
             )
     finally:
         ea_pipeline.load_nasa_cache = original_load_nasa_cache

@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import time
@@ -12,25 +13,25 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+import psutil
 
-from cimmyt_app.config_env import (
+from config_env import (
     get_featurehero_job_timeout_seconds,
     get_featurehero_params,
     load_app_env,
 )
-from cimmyt_app.pipeline.common import GEO_COLUMNS, GERMPLASM_COLUMNS
-from cimmyt_app.pipeline.model_registry import get_model_dir
-from cimmyt_app.pipeline.resource_paths import (
+from pipeline.common import GEO_COLUMNS, GERMPLASM_COLUMNS
+from pipeline.model_registry import get_model_dir
+from pipeline.resource_paths import (
     ROOT_DIR,
     get_featurehero_python,
     get_featurehero_repo,
+    get_macos_runtime_env,
     get_phen_transform_dataset_repo,
 )
 
 
 TARGET_COLUMN = "Grain Yield (T/Ha)"
-TARGET_FOLDER_NAME = "Grain_Yield_T_Ha"
-BASE_NAME = "Grain"
 JOBS_FILE = Path.home() / ".featurehero" / "jobs.pids"
 OTHER_TARGET_COLUMNS = [
     "Rank",
@@ -73,17 +74,27 @@ def get_featurehero_params_json() -> str:
     return json.dumps(params, ensure_ascii=False)
 
 
+def is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return psutil.pid_exists(pid)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def wait_for_pid(pid: int, timeout_seconds: float | None = None) -> None:
     if timeout_seconds is None:
         timeout_seconds = float(get_featurehero_job_timeout_seconds())
     started_at = time.time()
     while True:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not is_pid_running(pid):
             return
-        except PermissionError:
-            pass
 
         if time.time() - started_at > timeout_seconds:
             raise TimeoutError(f"Timed out while waiting for FeatureHero job {pid}.")
@@ -151,14 +162,15 @@ def find_launched_job(
     before: dict[str, dict[str, str]],
     after: dict[str, dict[str, str]],
     data_file: Path,
+    target_column: str,
 ) -> tuple[int, dict[str, str]]:
     expected_file = str(data_file)
     for pid, info in after.items():
         if pid in before:
             continue
-        if info.get("file_path") == expected_file and info.get("target_column") == TARGET_COLUMN:
+        if info.get("file_path") == expected_file and info.get("target_column") == target_column:
             return int(pid), info
-    raise RuntimeError("Could not find the launched FeatureHero Grain Yield job.")
+    raise RuntimeError(f"Could not find the launched FeatureHero job for target column {target_column!r}.")
 
 
 def read_first_metric_value(optimization_csv: Path, metric_name: str) -> float | None:
@@ -239,23 +251,37 @@ def resolve_model_feature_names(best_model_file: Path, sort_original_csv: Path, 
     return select_feature_names(sort_original_csv, best_features_file)
 
 
-def build_description(selected_feature_count: int, metric_name: str, metric_value: float | None) -> str:
+def build_description(
+    target_column: str,
+    selected_feature_count: int,
+    metric_name: str,
+    metric_value: float | None,
+) -> str:
     if metric_value is None:
         return (
-            f"{MODEL_MACHINE_NAME} trained for {TARGET_COLUMN} with "
+            f"{MODEL_MACHINE_NAME} trained for {target_column} with "
             f"{selected_feature_count} selected features."
         )
     return (
-        f"{MODEL_MACHINE_NAME} trained for {TARGET_COLUMN} with "
+        f"{MODEL_MACHINE_NAME} trained for {target_column} with "
         f"{selected_feature_count} selected features and "
         f"{metric_name}={metric_value:.4f}."
     )
 
 
-def prepare_analysis_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def build_target_names(target_column: str) -> tuple[str, str]:
+    sanitized = re.sub(r"[^A-Za-z0-9]+", "_", str(target_column).strip()).strip("_")
+    if not sanitized:
+        sanitized = "target"
+    folder_name = sanitized
+    base_name = sanitized[:80]
+    return folder_name, base_name
+
+
+def prepare_analysis_dataframe(df: pd.DataFrame, target_column: str) -> pd.DataFrame:
     prepared_df = df.copy()
-    if TARGET_COLUMN not in prepared_df.columns:
-        raise KeyError(f"Missing target column: {TARGET_COLUMN}")
+    if target_column not in prepared_df.columns:
+        raise ValueError(f"No se encontro la columna objetivo {target_column!r}.")
 
     drop_columns = {
         "idPK",
@@ -264,17 +290,18 @@ def prepare_analysis_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         *GERMPLASM_COLUMNS,
         "Grain Yield predicted",
     }
+    drop_columns.discard(target_column)
     prepared_df = prepared_df.drop(columns=[column for column in drop_columns if column in prepared_df.columns])
 
     for column in prepared_df.columns:
         prepared_df[column] = pd.to_numeric(prepared_df[column], errors="coerce")
 
-    prepared_df[TARGET_COLUMN] = pd.to_numeric(prepared_df[TARGET_COLUMN], errors="coerce")
-    prepared_df = prepared_df[prepared_df[TARGET_COLUMN].notna() & (prepared_df[TARGET_COLUMN] > 0)].copy()
+    prepared_df[target_column] = pd.to_numeric(prepared_df[target_column], errors="coerce")
+    prepared_df = prepared_df[prepared_df[target_column].notna() & (prepared_df[target_column] > 0)].copy()
     if prepared_df.empty:
         raise ValueError(
-            "Phase analysis for Grain Yield requires rows with numeric values greater than zero "
-            f"in {TARGET_COLUMN!r}."
+            "Phase analysis requires rows with numeric values greater than zero "
+            f"in {target_column!r}."
         )
 
     non_numeric_columns = [
@@ -290,12 +317,12 @@ def prepare_analysis_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return prepared_df
 
 
-def write_phase_analysis_inputs(target_dir: Path, df: pd.DataFrame) -> tuple[Path, Path, Path, Path]:
+def write_phase_analysis_inputs(target_dir: Path, base_name: str, df: pd.DataFrame) -> tuple[Path, Path, Path, Path]:
     target_dir.mkdir(parents=True, exist_ok=True)
-    grain_xlsx = target_dir / f"{BASE_NAME}.xlsx"
-    grain_csv = target_dir / f"{BASE_NAME}.csv"
-    analysis_csv = target_dir / f"{BASE_NAME}_for_analysis.csv"
-    analysis_xlsx = target_dir / f"{BASE_NAME}_for_analysis.xlsx"
+    grain_xlsx = target_dir / f"{base_name}.xlsx"
+    grain_csv = target_dir / f"{base_name}.csv"
+    analysis_csv = target_dir / f"{base_name}_for_analysis.csv"
+    analysis_xlsx = target_dir / f"{base_name}_for_analysis.xlsx"
 
     df.to_excel(grain_xlsx, index=False)
     df.to_csv(grain_csv, index=False)
@@ -332,6 +359,8 @@ def copy_if_exists(source: Path, destination: Path) -> None:
 def persist_model_artifacts(
     model_id: str,
     target_dir: Path,
+    target_column: str,
+    base_name: str,
     workspace_dir: Path,
     job_info: dict[str, str],
     source_phase5_csv: Path,
@@ -351,8 +380,8 @@ def persist_model_artifacts(
     if status_file is not None:
         copy_if_exists(status_file, model_dir / status_file.name)
 
-    grain_csv = target_dir / f"{BASE_NAME}.csv"
-    analysis_csv = target_dir / f"{BASE_NAME}_for_analysis.csv"
+    grain_csv = target_dir / f"{base_name}.csv"
+    analysis_csv = target_dir / f"{base_name}_for_analysis.csv"
     copy_if_exists(grain_csv, model_dir / grain_csv.name)
     copy_if_exists(analysis_csv, model_dir / analysis_csv.name)
 
@@ -372,12 +401,12 @@ def persist_model_artifacts(
     featurehero_params = get_featurehero_params()
     metric_name = str(featurehero_params.get("metric") or "mean_absolute_error")
     metric_value = read_first_metric_value(optimization_csv, metric_name)
-    description = build_description(len(selected_features), metric_name, metric_value)
+    description = build_description(target_column, len(selected_features), metric_name, metric_value)
 
     metadata = {
         "model_id": model_id,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "target_column": TARGET_COLUMN,
+        "target_column": target_column,
         "machine_name": MODEL_MACHINE_NAME,
         "metric_name": metric_name,
         "metric_value": metric_value,
@@ -412,6 +441,7 @@ def persist_model_artifacts(
 def launch_featurehero(
     data_file: Path,
     target_dir: Path,
+    target_column: str,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[int, dict[str, str], Path]:
     load_app_env()
@@ -429,6 +459,7 @@ def launch_featurehero(
         if not existing_pythonpath
         else f"{featurehero_pythonpath}:{existing_pythonpath}"
     )
+    env.update(get_macos_runtime_env())
 
     command = [
         str(featurehero_python),
@@ -438,22 +469,36 @@ def launch_featurehero(
         "--file",
         str(data_file),
         "--column",
-        TARGET_COLUMN,
+        target_column,
         "--background",
         "--params",
         get_featurehero_params_json(),
     ]
-    subprocess.run(
-        command,
-        check=True,
-        cwd=str(featurehero_repo),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            cwd=str(featurehero_repo),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stdout_text = (exc.stdout or "").strip()
+        stderr_text = (exc.stderr or "").strip()
+        details: list[str] = [
+            "FeatureHero launch command failed.",
+            f"Command: {exc.cmd}",
+            f"Exit code: {exc.returncode}",
+        ]
+        if stdout_text:
+            details.append("stdout:\n" + stdout_text)
+        if stderr_text:
+            details.append("stderr:\n" + stderr_text)
+        raise RuntimeError("\n\n".join(details)) from exc
 
     after_jobs = read_jobs()
-    pid, job_info = find_launched_job(before_jobs, after_jobs, data_file)
+    pid, job_info = find_launched_job(before_jobs, after_jobs, data_file, target_column)
     status_path_value = str(job_info.get("status_file", "")).strip()
     log_path_value = str(job_info.get("log_file", "")).strip()
     status_file = Path(status_path_value).expanduser() if status_path_value else None
@@ -465,12 +510,8 @@ def launch_featurehero(
     last_log_snapshot = ""
     last_message = ""
     while True:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not is_pid_running(pid):
             break
-        except PermissionError:
-            pass
 
         progress = read_status_progress(status_file)
         if progress is not None and progress != last_progress_snapshot:
@@ -497,7 +538,7 @@ def launch_featurehero(
             else:
                 phase_percent = 0
                 message = (
-                    "FeatureHero is training the Grain Yield model."
+                    f"FeatureHero is training the model for {target_column}."
                     + (f" Last update: {last_log_line}" if last_log_line else "")
                 )
             if message != last_message:
@@ -520,6 +561,7 @@ def run_phase_analysis(
     phase5_df: pd.DataFrame,
     phase_dir: Path,
     source_phase5_csv: Path,
+    target_column: str = TARGET_COLUMN,
     progress_callback: ProgressCallback | None = None,
 ) -> PhaseAnalysisOutputs:
     phase_dir.mkdir(parents=True, exist_ok=True)
@@ -529,19 +571,23 @@ def run_phase_analysis(
     phase5_df.to_csv(phase6_csv, index=False)
     phase5_df.to_excel(phase6_xlsx, index=False)
 
-    target_dir = phase_dir / TARGET_FOLDER_NAME
-    prepared_df = prepare_analysis_dataframe(phase5_df)
-    _, _, analysis_csv, _ = write_phase_analysis_inputs(target_dir, prepared_df)
+    target_folder_name, base_name = build_target_names(target_column)
+    target_dir = phase_dir / target_folder_name
+    prepared_df = prepare_analysis_dataframe(phase5_df, target_column)
+    _, _, analysis_csv, _ = write_phase_analysis_inputs(target_dir, base_name, prepared_df)
 
     pid, job_info, workspace_dir = launch_featurehero(
         analysis_csv,
         target_dir,
+        target_column,
         progress_callback=progress_callback,
     )
     model_id = time.strftime("%Y%m%d-%H%M%S")
     outputs = persist_model_artifacts(
         model_id=model_id,
         target_dir=target_dir,
+        target_column=target_column,
+        base_name=base_name,
         workspace_dir=workspace_dir,
         job_info=job_info,
         source_phase5_csv=source_phase5_csv,
@@ -552,7 +598,7 @@ def run_phase_analysis(
         "workspace_dir": str(workspace_dir),
         "model_id": outputs.model_id,
         "description": outputs.description,
-        "target_column": TARGET_COLUMN,
+        "target_column": target_column,
     }
     (phase_dir / "summary.json").write_text(
         json.dumps(analysis_summary, ensure_ascii=False, indent=2),

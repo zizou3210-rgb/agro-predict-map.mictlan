@@ -10,8 +10,8 @@ from unittest.mock import patch
 import pandas as pd
 from openpyxl import Workbook
 
-from cimmyt_app.ce_pipeline.phase01.phase1 import read_sheet_headers_and_rows, write_xlsx_rows
-from cimmyt_app.ce_pipeline.prediction.prediction import (
+from ce_pipeline.phase01.phase1 import read_sheet_headers_and_rows, write_xlsx_rows
+from ce_pipeline.prediction.prediction import (
     PREDICTION_PROFILE_LABEL_HEADER,
     PREDICTION_PROFILE_ABOVE_MEAN_HEADER,
     PREDICTION_PROFILE_KEY_HEADER,
@@ -476,7 +476,7 @@ class CePredictionDefinitionTest(unittest.TestCase):
                 selected_id_header="Nursery Id",
             )
 
-            from cimmyt_app.ce_pipeline.phase01.phase1 import read_sheet_headers_and_rows
+            from ce_pipeline.phase01.phase1 import read_sheet_headers_and_rows
             _, rows = read_sheet_headers_and_rows(output_file)
             pioneer_rows = [row for row in rows if row["Name"] == "PIONEER"]
             single_rows = [row for row in rows if row["Name"] == "SINGLE"]

@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parent
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -30,18 +30,19 @@ import time
 import uuid
 import webbrowser
 import zipfile
+
 from functools import partial
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from urllib.parse import parse_qs
 from xml.sax.saxutils import escape
 
-from cimmyt_app.pipeline.africa_country_localities import (
+from pipeline.africa_country_localities import (
     list_african_countries,
     sample_country_localities,
     sample_localities_within_bounds,
 )
-from cimmyt_app.config_env import (
+from config_env import (
     get_featurehero_settings,
     get_app_version,
     get_preprocess_validation_enabled,
@@ -50,13 +51,13 @@ from cimmyt_app.config_env import (
     load_app_env,
     update_featurehero_settings,
 )
-from cimmyt_app.pipeline.nasa_country_region import (
+from pipeline.nasa_country_region import (
     build_country_bounds_payload,
     build_manual_bounds_payload,
     build_manual_grid_payload,
     list_supported_country_bounds,
 )
-from cimmyt_app.pipeline.model_registry import (
+from pipeline.model_registry import (
     build_download_url,
     delete_registered_model,
     get_registered_model,
@@ -64,10 +65,10 @@ from cimmyt_app.pipeline.model_registry import (
     rename_registered_model,
     write_model_metadata,
 )
-from cimmyt_app.pipeline.manual_grid_interpolation import (
+from pipeline.manual_grid_interpolation import (
     build_manual_grid_interpolated_surface,
 )
-from cimmyt_app.workbook_preview import (
+from workbook_preview import (
     build_original_feature_collection_from_xlsx,
     describe_distinct_germplasm_names_from_xlsx,
     describe_workbook_columns,
@@ -89,13 +90,21 @@ CE_TRAINING_SCRIPT = CE_PIPELINE_DIR / "training.py"
 CE_PHASE06_SCRIPT = CE_PIPELINE_DIR / "phase06" / "phase06.py"
 TOP_GERMPLASM_ENABLED = False
 APP_RUNTIME_NAME = "MictlanAgriXGBoost"
-PREFERRED_PIPELINE_PYTHONS = [
-    Path(os.environ.get("APP_PIPELINE_PYTHON", "")).expanduser()
-    if os.environ.get("APP_PIPELINE_PYTHON")
-    else None,
-    APP_DIR / "resources" / "featurehero" / ".venv" / "bin" / "python",
-    Path(sys.executable).resolve(),
-]
+FEATUREHERO_DIR = APP_DIR / "resources" / "featurehero"
+PIPELINE_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL")
+
+def get_preferred_pipeline_pythons() -> list[Path | None]:
+    featurehero_venv = APP_DIR / "resources" / "featurehero" / ".venv"
+    return [
+        Path(os.environ.get("APP_PIPELINE_PYTHON", "")).expanduser()
+        if os.environ.get("APP_PIPELINE_PYTHON")
+        else None,
+        featurehero_venv / "Scripts" / "python.exe",
+        featurehero_venv / "Scripts" / "python3.exe",
+        featurehero_venv / "bin" / "python",
+        featurehero_venv / "bin" / "python3",
+        Path(sys.executable).resolve(),
+    ]
 
 
 def resolve_runtime_root() -> Path:
@@ -240,6 +249,52 @@ def get_active_pipeline_job_count() -> int:
     return active_total
 
 
+def is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            process = kernel32.OpenProcess(0x1000, False, pid)
+            if not process:
+                return False
+            kernel32.CloseHandle(process)
+            return True
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def terminate_pid(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            process = kernel32.OpenProcess(0x0001, False, pid)
+            if not process:
+                return False
+            try:
+                return bool(kernel32.TerminateProcess(process, 1))
+            finally:
+                kernel32.CloseHandle(process)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 15)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
 def get_active_featurehero_jobs() -> dict[str, object]:
     featurehero_jobs: dict[str, object] = {}
     if FEATUREHERO_JOBS_FILE.exists():
@@ -254,12 +309,7 @@ def get_active_featurehero_jobs() -> dict[str, object]:
             pid = int(pid_text)
         except (TypeError, ValueError):
             continue
-        try:
-            os.kill(pid, 0)
-            active_featurehero_jobs[pid_text] = info
-        except ProcessLookupError:
-            continue
-        except PermissionError:
+        if is_pid_running(pid):
             active_featurehero_jobs[pid_text] = info
 
     if active_featurehero_jobs != featurehero_jobs:
@@ -1652,10 +1702,62 @@ def find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def get_missing_pipeline_modules(python_exec: Path) -> list[str]:
+    probe = (
+        "import importlib.util, json; "
+        "mods=['featurehero','openpyxl','certifi','PIL']; "
+        "missing=[name for name in mods if importlib.util.find_spec(name) is None]; "
+        "print(json.dumps(missing))"
+    )
+    result = subprocess.run(
+        [str(python_exec), "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(APP_DIR),
+    )
+    payload = result.stdout.strip() or '[]'
+    try:
+        missing = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Unable to inspect pipeline dependencies for {python_exec}: {payload}") from exc
+    return [str(item) for item in missing]
+
+
+def ensure_pipeline_python_ready(python_exec: Path) -> Path:
+    missing_modules = get_missing_pipeline_modules(python_exec)
+    if not missing_modules:
+        return python_exec
+    if not FEATUREHERO_DIR.is_dir():
+        raise ModuleNotFoundError(
+            f"Missing pipeline dependencies ({', '.join(missing_modules)}) and the FeatureHero source directory was not found: {FEATUREHERO_DIR}"
+        )
+    subprocess.run(
+        [str(python_exec), "-m", "pip", "install", "--upgrade", "pip"],
+        check=True,
+        cwd=str(APP_DIR),
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [str(python_exec), "-m", "pip", "install", "."],
+        check=True,
+        cwd=str(FEATUREHERO_DIR),
+        capture_output=True,
+        text=True,
+    )
+    remaining_modules = get_missing_pipeline_modules(python_exec)
+    if remaining_modules:
+        raise ModuleNotFoundError(
+            f"The pipeline runtime is still missing modules after synchronization: {', '.join(remaining_modules)}"
+        )
+    return python_exec
+
+
 def resolve_pipeline_python() -> Path:
-    for candidate in PREFERRED_PIPELINE_PYTHONS:
+    for candidate in get_preferred_pipeline_pythons():
         if candidate and candidate.exists():
-            return candidate
+            return ensure_pipeline_python_ready(candidate)
     raise FileNotFoundError(
         "No local Python interpreter with the app pipeline dependencies was found."
     )
@@ -2549,12 +2651,9 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
                 pid = int(pid_text)
             except (TypeError, ValueError):
                 continue
-            try:
-                os.kill(pid, 15)
+            if terminate_pid(pid):
                 cancelled_featurehero_jobs += 1
-            except ProcessLookupError:
-                continue
-            except PermissionError:
+            elif is_pid_running(pid):
                 active_featurehero_jobs[pid_text] = info
         try:
             FEATUREHERO_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)

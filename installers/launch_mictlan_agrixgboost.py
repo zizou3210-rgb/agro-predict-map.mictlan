@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -16,8 +17,38 @@ INSTALLERS_DIR = Path(__file__).resolve().parent
 APP_DIR = INSTALLERS_DIR.parent
 ROOT_DIR = APP_DIR.parent
 APP_URL_PATH = "/app/"
-APP_URL = f"http://127.0.0.1:8000{APP_URL_PATH}"
+DEFAULT_PORT = int(os.environ.get("MICTLAN_APP_PORT", "8000"))
 SERVER_SCRIPT = APP_DIR / "server.py"
+
+
+def resolve_server_port(preferred_port: int = DEFAULT_PORT) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", preferred_port))
+            return preferred_port
+        except OSError:
+            pass
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def resolve_bundled_python_command() -> str | None:
+    candidates = [
+        APP_DIR / "python-runtime" / "bin" / "python3",
+        APP_DIR / "python-runtime" / "bin" / "python",
+        APP_DIR / "python-runtime" / "python.exe",
+        APP_DIR / "python-runtime" / "python3.exe",
+        Path("/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"),
+        Path("/usr/local/bin/python3.12"),
+        Path("/opt/homebrew/bin/python3.12"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def browser_candidates() -> list[str]:
@@ -77,10 +108,34 @@ def wait_for_server(url: str, timeout_seconds: float = 12.0) -> None:
             time.sleep(0.2)
 
 
+def build_runtime_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if sys.platform != "darwin":
+        return env
+
+    candidates = [
+        APP_DIR / "runtime-libs" / "libomp.dylib",
+        APP_DIR / "runtime-libs" / "lib" / "libomp.dylib",
+    ]
+    libomp_path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if libomp_path is None:
+        return env
+
+    lib_dir = str(libomp_path.parent)
+    current_dyld = str(env.get("DYLD_LIBRARY_PATH", "")).strip()
+    current_fallback = str(env.get("DYLD_FALLBACK_LIBRARY_PATH", "")).strip()
+    env["DYLD_LIBRARY_PATH"] = lib_dir if not current_dyld else f"{lib_dir}:{current_dyld}"
+    env["DYLD_FALLBACK_LIBRARY_PATH"] = lib_dir if not current_fallback else f"{lib_dir}:{current_fallback}"
+    return env
+
+
 def resolve_python_command() -> str:
     env_python = str(os.environ.get("PYTHON3", "")).strip()
     if env_python:
         return env_python
+    bundled_python = resolve_bundled_python_command()
+    if bundled_python:
+        return bundled_python
     if os.name == "nt":
         pythonw = Path(sys.executable).with_name("pythonw.exe")
         if pythonw.exists():
@@ -98,13 +153,16 @@ def ensure_server_script() -> None:
 
 def main() -> None:
     ensure_server_script()
+    port = resolve_server_port()
+    app_url = f"http://127.0.0.1:{port}{APP_URL_PATH}"
     server_process = subprocess.Popen(
-        [resolve_python_command(), str(SERVER_SCRIPT), "--port", "8000"],
+        [resolve_python_command(), str(SERVER_SCRIPT), "--port", str(port)],
         cwd=str(ROOT_DIR),
+        env=build_runtime_env(),
     )
     try:
-        wait_for_server(APP_URL)
-        launch_browser_window(APP_URL)
+        wait_for_server(app_url)
+        launch_browser_window(app_url)
         server_process.wait()
     except KeyboardInterrupt:
         pass

@@ -5,7 +5,9 @@ import argparse
 import json
 import os
 import platform
+import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,11 +20,18 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local desktop runti
 
 
 APP_NAME = "Mictlan-AgriXGBoost"
+PACKAGE_DIR_NAME = "cimmyt_app"
+WINDOWS_LAUNCHER_NAME = f"{APP_NAME}.cmd"
+WINDOWS_UNINSTALLER_NAME = f"Desinstalar {APP_NAME}.cmd"
+WINDOWS_SHORTCUT_NAME = f"{APP_NAME}.lnk"
+WINDOWS_UNINSTALL_SHORTCUT_NAME = f"Desinstalar {APP_NAME}.lnk"
 INSTALLERS_DIR = Path(__file__).resolve().parent
 APP_DIR = INSTALLERS_DIR.parent
 ROOT_DIR = APP_DIR.parent
 LAUNCHER_SCRIPT_NAME = "launch_mictlan_agrixgboost.py"
 ICON_RELATIVE_PATH = Path("icons") / "icon-app.svg"
+WINDOWS_SHORTCUT_ICON_SOURCE = Path("icons") / "icon_mictlan.png"
+WINDOWS_SHORTCUT_ICON_NAME = "icon_mictlan.ico"
 INSTALLER_STATE_NAME = "install_state.json"
 REQUIRED_APP_ENTRIES = [
     "__init__.py",
@@ -74,11 +83,53 @@ SKIP_FILE_NAMES = {
 }
 SKIP_RELATIVE_PATHS = {
     Path("pipeline") / "runs",
-    Path("pipeline") / "model",
     Path("ce_pipeline") / "model",
     Path("preprocess") / "phase01_quality_prepared",
     Path("dist"),
+    Path("installers") / "runtimes",
+    Path("installers") / "runtime-archives",
+    Path("resources") / "featurehero" / ".venv",
 }
+PIPELINE_MODEL_CODE_FILES = {
+    "__init__.py",
+    "grain_yield_model.py",
+    "runtime_predict.py",
+}
+PIPELINE_MODEL_BUNDLE_FILES = {
+    "metadata.json",
+    "best_model_sort_original.pkl",
+    "best_features_sort_original.pkl",
+    "sort_original.csv",
+    "selection_summary.json",
+    "optimization_sort_original.csv",
+    "optimization_overlap_sort_original.csv",
+    "phase04_normalization_stats.json",
+    "phase04_selected_fields.csv",
+}
+
+
+INSTALLER_LOG_PATH: Path | None = None
+
+
+def console_log(message: str) -> None:
+    print(message, flush=True)
+    if INSTALLER_LOG_PATH is not None:
+        INSTALLER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with INSTALLER_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(message + "\n")
+
+
+def resolve_installer_log_path() -> Path:
+    install_root = resolve_install_root()
+    return install_root / "installer-output.log"
+
+
+def initialize_installer_logging() -> None:
+    global INSTALLER_LOG_PATH
+    INSTALLER_LOG_PATH = resolve_installer_log_path()
+    INSTALLER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INSTALLER_LOG_PATH.write_text("", encoding="utf-8")
+    console_log(f"[installer] Writing log to {INSTALLER_LOG_PATH}")
 
 
 def python_launcher() -> str:
@@ -101,7 +152,7 @@ def resolve_install_root() -> Path:
 
 
 def resolve_installed_app_dir() -> Path:
-    return resolve_install_root() / "app"
+    return resolve_install_root() / "app" / PACKAGE_DIR_NAME
 
 
 def resolve_installed_installers_dir() -> Path:
@@ -112,15 +163,183 @@ def resolve_state_file() -> Path:
     return resolve_install_root() / INSTALLER_STATE_NAME
 
 
+def resolve_featurehero_runtime_dir(app_dir: Path | None = None) -> Path:
+    base_app_dir = app_dir or resolve_installed_app_dir()
+    return base_app_dir / "resources" / "featurehero" / ".venv"
+
+
+def resolve_bundled_runtime_dir(platform_name: str) -> Path:
+    return APP_DIR / "runtime" / platform_name
+
+
+def resolve_bundled_macos_python_pkg(app_dir: Path | None = None) -> Path:
+    base_app_dir = app_dir or resolve_installed_app_dir()
+    return base_app_dir / "python-installer" / "python-3.12.pkg"
+
+
+def resolve_bundled_python_command(app_dir: Path | None = None, platform_name: str | None = None) -> str | None:
+    base_app_dir = app_dir or resolve_installed_app_dir()
+    runtime_platform = platform_name or platform.system().lower()
+    candidates: list[Path] = []
+    if runtime_platform == "windows":
+        candidates = [
+            base_app_dir / "python-runtime" / "python.exe",
+            base_app_dir / "runtime" / "windows" / "python-runtime" / "python.exe",
+            base_app_dir / "python-runtime" / "python3.exe",
+        ]
+    elif runtime_platform == "linux":
+        candidates = [
+            base_app_dir / "python-runtime" / "bin" / "python3",
+            base_app_dir / "runtime" / "linux" / "python-runtime" / "bin" / "python3",
+            base_app_dir / "python-runtime" / "bin" / "python",
+        ]
+    else:
+        return None
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def iter_runtime_python_candidates(venv_dir: Path) -> list[Path]:
+    return [
+        venv_dir / "bin" / "python3",
+        venv_dir / "bin" / "python",
+        venv_dir / "Scripts" / "python.exe",
+        venv_dir / "Scripts" / "python3.exe",
+    ]
+
+
+def python_version_tuple(python_exec: Path | str) -> tuple[int, int] | None:
+    try:
+        result = subprocess.run(
+            [str(python_exec), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    output = result.stdout.strip()
+    try:
+        major, minor = output.split(".", 1)
+        return int(major), int(minor)
+    except (ValueError, TypeError):
+        return None
+
+
+def resolve_python312_command() -> str | None:
+    candidates = [
+        shutil.which("python3.12"),
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        "/usr/local/bin/python3.12",
+        "/opt/homebrew/bin/python3.12",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        version = python_version_tuple(candidate)
+        if version and version >= (3, 12):
+            return str(candidate)
+    return None
+
+
+def resolve_bootstrap_python() -> str:
+    python312 = resolve_python312_command()
+    if python312:
+        return python312
+    candidates = [
+        shutil.which("python3"),
+        shutil.which("python"),
+    ]
+    for candidate in candidates:
+        if candidate:
+            return candidate
+    return "python3"
+
+
+def ensure_macos_python312(app_dir: Path) -> str:
+    python_exec = resolve_python312_command()
+    if python_exec:
+        return python_exec
+
+    pkg_path = resolve_bundled_macos_python_pkg(app_dir)
+    if not pkg_path.exists():
+        raise FileNotFoundError(
+            f"Bundled Python 3.12 installer was not found in the app snapshot: {pkg_path}"
+        )
+
+    install_command = f"installer -pkg {shlex.quote(str(pkg_path))} -target /"
+    apple_script_command = install_command.replace("\\", "\\\\").replace('"', '\\"')
+    if shutil.which("osascript"):
+        subprocess.run(
+            ["osascript", "-e", f'do shell script "{apple_script_command}" with administrator privileges'],
+            check=True,
+        )
+    else:
+        raise RuntimeError(
+            "macOS Python 3.12 is required. Install it from the bundled pkg manually: "
+            f"{pkg_path}"
+        )
+
+    python_exec = resolve_python312_command()
+    if python_exec:
+        return python_exec
+    raise RuntimeError("Python 3.12 installation completed but python3.12 is still not available.")
+
+
+def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create: bool = True, python_exec: str | None = None) -> str:
+    featurehero_dir = app_dir / "resources" / "featurehero"
+    console_log(f"[installer] Preparing FeatureHero runtime from {featurehero_dir}")
+    if not featurehero_dir.exists():
+        if required:
+            raise FileNotFoundError(f"FeatureHero source was not found in the installed app: {featurehero_dir}")
+        return "FeatureHero source directory was not found; runtime bootstrap skipped."
+
+    venv_dir = resolve_featurehero_runtime_dir(app_dir)
+    existing_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
+    if existing_python is not None:
+        version = python_version_tuple(existing_python)
+        if version and version >= (3, 12):
+            venv_python = existing_python
+            console_log(f"[installer] Reusing existing FeatureHero runtime at {venv_dir}")
+        else:
+            console_log(f"[installer] Removing incompatible runtime at {venv_dir}")
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            existing_python = None
+            venv_python = None
+    else:
+        venv_python = None
+
+    if venv_python is None:
+        if not allow_create:
+            raise FileNotFoundError(
+                f"FeatureHero bundled runtime was not found in the installer payload: {venv_dir}"
+            )
+        selected_python = python_exec or resolve_bootstrap_python()
+        console_log(f"[installer] Creating virtual environment with {selected_python}")
+        subprocess.run([selected_python, "-m", "venv", str(venv_dir)], check=True)
+        venv_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
+        if venv_python is None:
+            raise FileNotFoundError(f"FeatureHero virtualenv Python was not created in: {venv_dir}")
+
+    console_log("[installer] Upgrading pip inside FeatureHero runtime")
+    subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], check=True)
+    console_log("[installer] Installing FeatureHero package into the runtime")
+    subprocess.run([str(venv_python), "-m", "pip", "install", "."], cwd=str(featurehero_dir), check=True)
+    return f"FeatureHero runtime prepared at {venv_dir}."
+
+
 def windows_targets() -> list[Path]:
     home = Path.home()
     desktop = home / "Desktop"
     start_menu = Path(os.environ.get("APPDATA", home)) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
     return [
-        desktop / f"{APP_NAME}.cmd",
-        start_menu / APP_NAME / f"{APP_NAME}.cmd",
-        desktop / f"Desinstalar {APP_NAME}.cmd",
-        start_menu / APP_NAME / f"Desinstalar {APP_NAME}.cmd",
+        desktop / WINDOWS_SHORTCUT_NAME,
+        start_menu / APP_NAME / WINDOWS_SHORTCUT_NAME,
+        desktop / WINDOWS_UNINSTALL_SHORTCUT_NAME,
+        start_menu / APP_NAME / WINDOWS_UNINSTALL_SHORTCUT_NAME,
     ]
 
 
@@ -148,6 +367,90 @@ def mac_targets() -> list[Path]:
 def write_windows_cmd(path: Path, command: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"@echo off\r\n{command}\r\n", encoding="utf-8")
+
+
+def resolve_windows_shortcut_python(python_exec: str) -> str:
+    candidate = Path(python_exec)
+    if candidate.name.lower() == "python.exe":
+        pythonw = candidate.with_name("pythonw.exe")
+        if pythonw.exists():
+            return str(pythonw)
+    return python_exec
+
+
+def export_windows_shortcut_icon(app_dir: Path, python_exec: str) -> Path | None:
+    source_icon = app_dir / WINDOWS_SHORTCUT_ICON_SOURCE
+    if not source_icon.exists():
+        return None
+    target_icon = app_dir / "icons" / WINDOWS_SHORTCUT_ICON_NAME
+    if target_icon.exists():
+        return target_icon
+    runtime_python = next(
+        (candidate for candidate in iter_runtime_python_candidates(resolve_featurehero_runtime_dir(app_dir)) if candidate.exists()),
+        None,
+    )
+    image_python = str(runtime_python) if runtime_python is not None else python_exec
+    subprocess.run(
+        [
+            image_python,
+            "-c",
+            (
+                "from pathlib import Path; from PIL import Image; "
+                "src = Path(__import__('sys').argv[1]); dst = Path(__import__('sys').argv[2]); "
+                "dst.parent.mkdir(parents=True, exist_ok=True); "
+                "Image.open(src).save(dst, format='ICO')"
+            ),
+            str(source_icon),
+            str(target_icon),
+        ],
+        check=True,
+    )
+    return target_icon if target_icon.exists() else None
+
+
+def _powershell_single_quote(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def write_windows_shortcut(
+    path: Path,
+    *,
+    target_path: str,
+    arguments: str = "",
+    working_directory: str = "",
+    icon_path: str = "",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    script_lines = [
+        "$WshShell = New-Object -ComObject WScript.Shell",
+        f"$Shortcut = $WshShell.CreateShortcut('{_powershell_single_quote(str(path))}')",
+        f"$Shortcut.TargetPath = '{_powershell_single_quote(target_path)}'",
+    ]
+    if arguments:
+        script_lines.append(f"$Shortcut.Arguments = '{_powershell_single_quote(arguments)}'")
+    if working_directory:
+        script_lines.append(f"$Shortcut.WorkingDirectory = '{_powershell_single_quote(working_directory)}'")
+    if icon_path:
+        script_lines.append(f"$Shortcut.IconLocation = '{_powershell_single_quote(icon_path)},0'")
+    script_lines.append("$Shortcut.Save()")
+    subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "; ".join(script_lines),
+        ],
+        check=True,
+    )
+
+
+def build_windows_python_command(python_exec: str, script_path: Path, *script_args: str) -> str:
+    quoted_args = " ".join(f'"{arg}"' for arg in script_args)
+    if quoted_args:
+        return f'"{python_exec}" "{script_path}" {quoted_args}'
+    return f'"{python_exec}" "{script_path}"'
 
 
 def write_shell_launcher(path: Path, command: str) -> None:
@@ -196,6 +499,36 @@ def load_state() -> tuple[Path | None, list[Path]]:
     return install_root, installed_files
 
 
+def _read_json_file(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def resolve_latest_pipeline_model_dir() -> Path | None:
+    models_root = APP_DIR / "pipeline" / "model"
+    if not models_root.exists():
+        return None
+
+    candidates: list[tuple[str, Path]] = []
+    for child in models_root.iterdir():
+        if not child.is_dir():
+            continue
+        metadata_path = child / "metadata.json"
+        if not metadata_path.exists():
+            continue
+        metadata = _read_json_file(metadata_path)
+        sort_key = str(metadata.get("created_at") or child.name)
+        candidates.append((sort_key, child))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
 def copy_entry(source: Path, destination: Path, relative_path: Path | None = None) -> None:
     normalized_relative_path = relative_path or Path(source.name)
     if should_skip_entry(normalized_relative_path):
@@ -214,6 +547,26 @@ def should_skip_entry(relative_path: Path) -> bool:
     if not normalized_parts:
         return False
     normalized_path = Path(*normalized_parts)
+    pipeline_model_root = Path("pipeline") / "model"
+    if normalized_path == pipeline_model_root:
+        return False
+    if pipeline_model_root in normalized_path.parents:
+        latest_model_dir = resolve_latest_pipeline_model_dir()
+        latest_model_name = latest_model_dir.name if latest_model_dir is not None else ""
+        relative_to_model_root = normalized_path.relative_to(pipeline_model_root)
+        if len(relative_to_model_root.parts) == 1:
+            entry_name = relative_to_model_root.name
+            if entry_name in PIPELINE_MODEL_CODE_FILES:
+                return False
+            if entry_name == latest_model_name:
+                return False
+            return True
+        model_name = relative_to_model_root.parts[0]
+        if model_name != latest_model_name:
+            return True
+        if relative_to_model_root.name in PIPELINE_MODEL_BUNDLE_FILES:
+            return False
+        return True
     if normalized_path in SKIP_RELATIVE_PATHS:
         return True
     if any(parent in SKIP_RELATIVE_PATHS for parent in normalized_path.parents):
@@ -228,8 +581,35 @@ def should_skip_entry(relative_path: Path) -> bool:
     return False
 
 
+def stage_bundled_runtime(app_dir: Path, platform_name: str) -> str:
+    bundled_runtime_dir = resolve_bundled_runtime_dir(platform_name)
+    console_log(f"[installer] Staging bundled runtime for {platform_name} from {bundled_runtime_dir}")
+    if not bundled_runtime_dir.exists():
+        return f"No bundled runtime was found for {platform_name}; fallback bootstrap will be used."
+
+    copied_any = False
+    for child in bundled_runtime_dir.iterdir():
+        destination = app_dir / child.name
+        if destination.exists():
+            if destination.is_dir():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+        if child.is_dir():
+            shutil.copytree(child, destination, symlinks=True)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(child, destination)
+        copied_any = True
+
+    if not copied_any:
+        return f"Bundled runtime directory for {platform_name} was empty; fallback bootstrap will be used."
+    return f"Bundled runtime copied from {bundled_runtime_dir}."
+
+
 def stage_application_snapshot() -> tuple[Path, list[str]]:
     install_root = resolve_install_root()
+    console_log(f"[installer] Installing snapshot into {install_root}")
     app_install_dir = resolve_installed_app_dir()
     if app_install_dir.exists():
         shutil.rmtree(app_install_dir)
@@ -238,6 +618,7 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
     copied_entries: list[str] = []
     for entry_name in REQUIRED_APP_ENTRIES + OPTIONAL_APP_ENTRIES:
         source = APP_DIR / entry_name
+        console_log(f"[installer] Copying {entry_name}")
         if not source.exists():
             if entry_name in REQUIRED_APP_ENTRIES:
                 raise FileNotFoundError(f"Missing required app entry for installer snapshot: {source}")
@@ -257,31 +638,88 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
 
 
 def install_windows() -> str:
+    console_log("[installer] Starting Windows installation")
     install_root, copied_entries = stage_application_snapshot()
+    runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "windows")
+    console_log(f"[installer] {runtime_copy_message}")
+    bundled_python = resolve_bundled_python_command(resolve_installed_app_dir(), "windows")
+    if not bundled_python:
+        raise FileNotFoundError("Bundled Python 3.12 was not found for Windows installation.")
+    console_log(f"[installer] Using bundled Python: {bundled_python}")
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(
+        resolve_installed_app_dir(),
+        required=False,
+        python_exec=bundled_python,
+    )
+    console_log(f"[installer] {runtime_bootstrap_message}")
+    runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
-    launch_command = f'start "" "{python_launcher()}" "{launch_script}"'
-    uninstall_command = f'start "" "{python_launcher()}" "{installer_script}" --uninstall'
+    launch_python = bundled_python or python_launcher()
+    launch_command = build_windows_python_command(launch_python, launch_script)
+    uninstall_command = build_windows_python_command(launch_python, installer_script, "--uninstall")
+    packaged_launcher = install_root / WINDOWS_LAUNCHER_NAME
+    packaged_uninstaller = install_root / WINDOWS_UNINSTALLER_NAME
+    shortcut_python = resolve_windows_shortcut_python(launch_python)
+    shortcut_icon = export_windows_shortcut_icon(resolve_installed_app_dir(), launch_python)
 
     created_files: list[Path] = [install_root]
+    console_log("[installer] Creating Windows shortcuts")
+    write_windows_cmd(packaged_launcher, launch_command)
+    write_windows_cmd(packaged_uninstaller, uninstall_command)
+    created_files.extend([packaged_launcher, packaged_uninstaller])
     targets = windows_targets()
     for path in targets[:2]:
-        write_windows_cmd(path, launch_command)
+        write_windows_shortcut(
+            path,
+            target_path=shortcut_python,
+            arguments=f'"{launch_script}"',
+            working_directory=str(installed_installers_dir),
+            icon_path=str(shortcut_icon) if shortcut_icon else "",
+        )
         created_files.append(path)
     for path in targets[2:]:
-        write_windows_cmd(path, uninstall_command)
+        write_windows_shortcut(
+            path,
+            target_path=shortcut_python,
+            arguments=f'"{installer_script}" --uninstall',
+            working_directory=str(installed_installers_dir),
+            icon_path=str(shortcut_icon) if shortcut_icon else "",
+        )
         created_files.append(path)
 
     save_state(created_files, install_root)
+    console_log("[installer] Installation state saved")
+    console_log("[installer] Launching app after installation")
+    try:
+        os.startfile(str(packaged_launcher))
+    except AttributeError:
+        subprocess.Popen(
+            [launch_python, str(launch_script)],
+            cwd=str(installed_installers_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     return (
         "Instalacion completada en Windows. "
-        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los accesos."
+        f"Se actualizo la snapshot local con {len(copied_entries)} componentes, se creo el lanzador local y se recrearon los accesos. "
+        f"{runtime_message}"
     )
 
 
 def install_linux() -> str:
     install_root, copied_entries = stage_application_snapshot()
+    runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "linux")
+    bundled_python = resolve_bundled_python_command(resolve_installed_app_dir(), "linux")
+    if not bundled_python:
+        raise FileNotFoundError("Bundled Python 3.12 was not found for Linux installation.")
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(
+        resolve_installed_app_dir(),
+        required=False,
+        python_exec=bundled_python,
+    )
+    runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
@@ -307,12 +745,22 @@ def install_linux() -> str:
     save_state(created_files, install_root)
     return (
         "Instalacion completada en Linux. "
-        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los lanzadores."
+        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los lanzadores. "
+        f"{runtime_message}"
     )
 
 
 def install_macos() -> str:
     install_root, copied_entries = stage_application_snapshot()
+    runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "macos")
+    macos_python = ensure_macos_python312(resolve_installed_app_dir())
+    runtime_bootstrap_message = bootstrap_featurehero_runtime(
+        resolve_installed_app_dir(),
+        required=True,
+        allow_create=True,
+        python_exec=macos_python,
+    )
+    runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
@@ -332,7 +780,8 @@ def install_macos() -> str:
     save_state(created_files, install_root)
     return (
         "Instalacion completada en macOS. "
-        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los lanzadores."
+        f"Se actualizo la snapshot local con {len(copied_entries)} componentes y se recrearon los lanzadores. "
+        f"{runtime_message}"
     )
 
 
@@ -500,7 +949,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.headless or args.install or args.uninstall:
-        message = uninstall_desktop() if args.uninstall else install_for_current_platform()
+        initialize_installer_logging()
+        try:
+            message = uninstall_desktop() if args.uninstall else install_for_current_platform()
+            console_log(message)
+        except Exception as exc:
+            console_log(f"ERROR: {exc}")
+            raise
+        return
+    if tk is None or messagebox is None:
+        message = install_for_current_platform()
         print(message)
         return
     root = build_ui()

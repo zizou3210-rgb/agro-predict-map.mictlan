@@ -6,7 +6,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     APP_BOOT_DIR = Path(__file__).resolve().parents[2]
-    PACKAGE_PARENT = APP_BOOT_DIR.parent
+    PACKAGE_PARENT = APP_BOOT_DIR
     if str(PACKAGE_PARENT) not in sys.path:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
@@ -19,16 +19,16 @@ from typing import Callable
 
 import pandas as pd
 
-from cimmyt_app.ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
-from cimmyt_app.pipeline.common import GEO_COLUMNS, GERMPLASM_COLUMNS, dataframe_to_geojson
-from cimmyt_app.pipeline.model.grain_yield_model import run_grain_yield_prediction
-from cimmyt_app.pipeline.run_model_pipeline import (
+from ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
+from pipeline.common import GEO_COLUMNS, GERMPLASM_COLUMNS, dataframe_to_geojson
+from pipeline.model.grain_yield_model import run_grain_yield_prediction
+from pipeline.run_model_pipeline import (
     combine_geo_and_prediction_dataframes,
     normalize_prediction_output_values,
     write_combined_prediction_outputs,
 )
-from cimmyt_app.workbook_preview import _derive_country_from_coordinates, _parse_coordinate
-from cimmyt_app.workbook_preview import (
+from workbook_preview import _derive_country_from_coordinates, _parse_coordinate
+from workbook_preview import (
     PREDICTION_GROUP_KEY_HEADER,
     PREDICTION_GROUP_LABEL_HEADER,
     PREDICTION_GROUP_REP_HEADER,

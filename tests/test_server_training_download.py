@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cimmyt_app.server import (
+from server import (
     build_completed_summary_for_ui,
     resolve_ce_training_results_download_path,
     should_inline_completed_geojson,

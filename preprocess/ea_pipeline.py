@@ -19,12 +19,12 @@ from urllib.request import Request, urlopen
 
 from openpyxl import Workbook, load_workbook
 
-from cimmyt_app.preprocess.phase1_schema import OUTPUT_HEADERS as PHASE1_COMPAT_HEADERS
-from cimmyt_app.pipeline.africa_country_localities import (
+from preprocess.phase1_schema import OUTPUT_HEADERS as PHASE1_COMPAT_HEADERS
+from pipeline.africa_country_localities import (
     load_country_localities,
     resolve_african_country,
 )
-from cimmyt_app.pipeline.nasa_country_region import (
+from pipeline.nasa_country_region import (
     build_manual_grid_cells,
     get_country_bounds,
     iter_country_tile_bounds,
@@ -1205,8 +1205,8 @@ def build_data_input_rows(records: list[dict[str, object]]) -> tuple[list[dict[s
     return output_rows, skipped_rows
 
 
-def build_country_locality_phase02_headers(headers: list[str]) -> list[str]:
-    output_headers = build_phase02_headers(headers)
+def build_country_locality_phase02_headers(headers: list[str], target_header: str = YIELD_HEADER) -> list[str]:
+    output_headers = build_phase02_headers(headers, target_header=target_header)
     extra_headers = [
         FORECAST_LOCALITY_HEADER,
         FORECAST_LOCALITY_GEONAMEID_HEADER,
@@ -2033,9 +2033,9 @@ def climate_header_to_label(header: str) -> str:
     return header
 
 
-def build_phase02_headers(headers: list[str]) -> list[str]:
+def build_phase02_headers(headers: list[str], target_header: str = YIELD_HEADER) -> list[str]:
     output_headers = list(headers)
-    insert_after = "Grain Yield (T/Ha)"
+    insert_after = str(target_header or "").strip() or YIELD_HEADER
     if insert_after not in output_headers:
         raise ValueError(f"No se encontro la columna objetivo '{insert_after}'.")
     insert_at = output_headers.index(insert_after) + 1
@@ -2047,6 +2047,7 @@ def build_phase02_records(
     records: list[dict[str, object]],
     progress_callback: Callable[[int, str, str, dict[str, object] | None], None] | None = None,
     climate_override: dict[str, object] | None = None,
+    target_header: str = YIELD_HEADER,
 ) -> tuple[list[str], list[dict[str, object]], dict[str, object]]:
     output_dir = PHASE_DIRS["phase02"]
     climate_scope_override = str((climate_override or {}).get("climate_scope") or "").strip()
@@ -2134,9 +2135,9 @@ def build_phase02_records(
     }
 
     phase02_headers = (
-        build_country_locality_phase02_headers(headers)
+        build_country_locality_phase02_headers(headers, target_header=target_header)
         if locality_mode
-        else build_phase02_headers(headers)
+        else build_phase02_headers(headers, target_header=target_header)
     )
     phase02_records: list[dict[str, object]] = []
     matched_rows = 0

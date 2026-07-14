@@ -7,13 +7,13 @@ from typing import Callable
 
 import pandas as pd
 
-from cimmyt_app.pipeline.common import dataframe_to_geojson
-from cimmyt_app.pipeline.model.grain_yield_model import run_grain_yield_prediction
-from cimmyt_app.pipeline.phase_analysis import run_phase_analysis
-from cimmyt_app.pipeline.phase2 import run_phase2
-from cimmyt_app.pipeline.phase3 import run_phase3
-from cimmyt_app.pipeline.phase4 import run_phase4
-from cimmyt_app.pipeline.phase5 import run_phase5
+from pipeline.common import dataframe_to_geojson
+from pipeline.model.grain_yield_model import run_grain_yield_prediction
+from pipeline.phase_analysis import run_phase_analysis
+from pipeline.phase2 import run_phase2
+from pipeline.phase3 import run_phase3
+from pipeline.phase4 import run_phase4
+from pipeline.phase5 import run_phase5
 
 
 ProgressCallback = Callable[[int, str, str], None]

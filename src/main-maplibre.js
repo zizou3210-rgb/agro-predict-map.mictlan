@@ -90,9 +90,26 @@ const asFloat = (value) => {
   return Number.isFinite(numeric) ? numeric : null;
 };
 
+let activeTargetColumn = "Grain Yield (T/Ha)";
+
+const resolveFeatureTargetColumn = (properties = {}) => {
+  const metadataTarget = String(properties?.target_column ?? "").trim();
+  if (metadataTarget && Object.prototype.hasOwnProperty.call(properties, metadataTarget)) {
+    return metadataTarget;
+  }
+  if (Object.prototype.hasOwnProperty.call(properties, activeTargetColumn)) {
+    return activeTargetColumn;
+  }
+  if (Object.prototype.hasOwnProperty.call(properties, "Grain Yield (T/Ha)")) {
+    return "Grain Yield (T/Ha)";
+  }
+  const yieldLike = Object.keys(properties).find((key) => /yield/i.test(String(key)));
+  return yieldLike || activeTargetColumn;
+};
+
 const getPagedAttributes = (feature) => {
   const entries = Object.entries(feature.properties).filter(
-    ([key]) => !["row_number", "Country", "Grain Yield (T/Ha)", "idPK"].includes(key),
+    ([key]) => !["row_number", "Country", resolveFeatureTargetColumn(feature.properties), "idPK"].includes(key),
   );
   entries.sort(([left], [right]) => left.localeCompare(right));
   return entries;
@@ -104,7 +121,7 @@ const geoInfoEntries = (feature) => {
   const entries = [
     ["Geocoordinate ID", feature.properties.idPK ?? feature.properties.row_number],
     ["Country", feature.properties.Country ?? enrichment?.country ?? "No data"],
-    ["Grain Yield", formatAttributeValue(feature.properties["Grain Yield (T/Ha)"])],
+    [resolveFeatureTargetColumn(feature.properties), formatAttributeValue(feature.properties[resolveFeatureTargetColumn(feature.properties)])],
     ["Latitude", formatCoordinate(latitude)],
     ["Longitude", formatCoordinate(longitude)],
   ];
@@ -127,7 +144,7 @@ const showTooltip = (event, feature) => {
   tooltip.hidden = false;
   tooltip.innerHTML = `
     <strong>Record ${properties.idPK ?? properties.row_number}</strong>
-    <p>Grain Yield (T/Ha): ${formatAttributeValue(properties["Grain Yield (T/Ha)"])}</p>
+    <p>${resolveFeatureTargetColumn(properties)}: ${formatAttributeValue(properties[resolveFeatureTargetColumn(properties)])}</p>
     <p>Latitude: ${formatCoordinate(latitude)}</p>
     <p>Longitude: ${formatCoordinate(longitude)}</p>
     ${properties.Country ? `<p>Country: ${properties.Country}</p>` : ""}
@@ -489,6 +506,9 @@ const fitMapToFeatures = (features) => {
 
 const applyFeatureCollection = async (geojson, sourceName) => {
   const points = geojson.features;
+  if (Array.isArray(points) && points.length) {
+    activeTargetColumn = resolveFeatureTargetColumn(points[0].properties ?? {});
+  }
   const longitudes = points.map((feature) => feature.geometry.coordinates[0]);
   const latitudes = points.map((feature) => feature.geometry.coordinates[1]);
 
