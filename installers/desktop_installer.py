@@ -692,12 +692,15 @@ def install_windows() -> str:
     save_state(created_files, install_root)
     console_log("[installer] Installation state saved")
     console_log("[installer] Launching app after installation")
-    subprocess.Popen(
-        [launch_python, str(launch_script)],
-        cwd=str(installed_installers_dir),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        os.startfile(str(packaged_launcher))
+    except AttributeError:
+        subprocess.Popen(
+            [launch_python, str(launch_script)],
+            cwd=str(installed_installers_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     return (
         "Instalacion completada en Windows. "
         f"Se actualizo la snapshot local con {len(copied_entries)} componentes, se creo el lanzador local y se recrearon los accesos. "
