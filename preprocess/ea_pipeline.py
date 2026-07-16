@@ -9,6 +9,7 @@ import re
 import shutil
 import statistics
 import time
+from threading import RLock
 from datetime import date, datetime, time as dt_time, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -48,6 +49,10 @@ RETRY_SLEEP_SECONDS = 5
 MAX_RETRY_SLEEP_SECONDS = 120
 HARVEST_BACK_WEEKS = 8
 SIMILARITY_THRESHOLD = 0.86
+
+_NASA_SERIES_AGGREGATION_CACHE: dict[int, dict[str, object]] = {}
+_NASA_WINDOW_METRICS_CACHE: dict[tuple[int, str, str], dict[str, float | None]] = {}
+_NASA_AGGREGATION_LOCK = RLock()
 
 PHASE_DIRS = {
     "phase00": ROOT_DIR / "phase00_selected_input",
@@ -1653,6 +1658,47 @@ def daterange(start_date: date, end_date: date) -> list[date]:
     return [start_date + timedelta(days=offset) for offset in range((end_date - start_date).days + 1)]
 
 
+def _build_nasa_series_aggregation_cache(
+    nasa_series: dict[str, dict[str, float | None]],
+) -> dict[str, object]:
+    cache_key = id(nasa_series)
+    with _NASA_AGGREGATION_LOCK:
+        cached = _NASA_SERIES_AGGREGATION_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    keys = sorted(set(nasa_series.get("T2M", {}).keys()) | set(nasa_series.get("PRECTOTCORR", {}).keys()))
+    key_to_index = {key: index for index, key in enumerate(keys)}
+    temperature_prefix_sum = [0.0]
+    temperature_prefix_count = [0]
+    precipitation_prefix_sum = [0.0]
+
+    running_temperature_sum = 0.0
+    running_temperature_count = 0
+    running_precipitation_sum = 0.0
+    for key in keys:
+        temperature = nasa_series.get("T2M", {}).get(key)
+        precipitation = nasa_series.get("PRECTOTCORR", {}).get(key)
+        if temperature is not None:
+            running_temperature_sum += temperature
+            running_temperature_count += 1
+        if precipitation is not None:
+            running_precipitation_sum += precipitation
+        temperature_prefix_sum.append(running_temperature_sum)
+        temperature_prefix_count.append(running_temperature_count)
+        precipitation_prefix_sum.append(running_precipitation_sum)
+
+    prepared = {
+        "key_to_index": key_to_index,
+        "temperature_prefix_sum": temperature_prefix_sum,
+        "temperature_prefix_count": temperature_prefix_count,
+        "precipitation_prefix_sum": precipitation_prefix_sum,
+    }
+    with _NASA_AGGREGATION_LOCK:
+        _NASA_SERIES_AGGREGATION_CACHE[cache_key] = prepared
+    return prepared
+
+
 def aggregate_metrics(
     nasa_series: dict[str, dict[str, float | None]],
     start_date: date,
@@ -1661,21 +1707,49 @@ def aggregate_metrics(
     if end_date < start_date:
         return {"avg_t2m": None, "total_prectotcorr": None}
 
-    temperatures: list[float] = []
-    precipitations: list[float] = []
-    for current_date in daterange(start_date, end_date):
-        key = format_nasa_date(current_date)
-        temperature = nasa_series["T2M"].get(key)
-        precipitation = nasa_series["PRECTOTCORR"].get(key)
-        if temperature is not None:
-            temperatures.append(temperature)
-        if precipitation is not None:
-            precipitations.append(precipitation)
+    window_cache_key = (id(nasa_series), start_date.isoformat(), end_date.isoformat())
+    with _NASA_AGGREGATION_LOCK:
+        cached_window_metrics = _NASA_WINDOW_METRICS_CACHE.get(window_cache_key)
+    if cached_window_metrics is not None:
+        return cached_window_metrics
 
-    return {
-        "avg_t2m": (sum(temperatures) / len(temperatures)) if temperatures else None,
-        "total_prectotcorr": sum(precipitations) if precipitations else None,
-    }
+    prepared = _build_nasa_series_aggregation_cache(nasa_series)
+    key_to_index = prepared["key_to_index"]
+    start_key = format_nasa_date(start_date)
+    end_key = format_nasa_date(end_date)
+    start_index = key_to_index.get(start_key)
+    end_index = key_to_index.get(end_key)
+
+    if start_index is None or end_index is None or end_index < start_index:
+        temperatures: list[float] = []
+        precipitations: list[float] = []
+        for current_date in daterange(start_date, end_date):
+            key = format_nasa_date(current_date)
+            temperature = nasa_series["T2M"].get(key)
+            precipitation = nasa_series["PRECTOTCORR"].get(key)
+            if temperature is not None:
+                temperatures.append(temperature)
+            if precipitation is not None:
+                precipitations.append(precipitation)
+        metrics = {
+            "avg_t2m": (sum(temperatures) / len(temperatures)) if temperatures else None,
+            "total_prectotcorr": sum(precipitations) if precipitations else None,
+        }
+    else:
+        temperature_prefix_sum = prepared["temperature_prefix_sum"]
+        temperature_prefix_count = prepared["temperature_prefix_count"]
+        precipitation_prefix_sum = prepared["precipitation_prefix_sum"]
+        temperature_sum = temperature_prefix_sum[end_index + 1] - temperature_prefix_sum[start_index]
+        temperature_count = temperature_prefix_count[end_index + 1] - temperature_prefix_count[start_index]
+        precipitation_sum = precipitation_prefix_sum[end_index + 1] - precipitation_prefix_sum[start_index]
+        metrics = {
+            "avg_t2m": (temperature_sum / temperature_count) if temperature_count else None,
+            "total_prectotcorr": precipitation_sum if precipitation_sum != 0.0 else 0.0,
+        }
+
+    with _NASA_AGGREGATION_LOCK:
+        _NASA_WINDOW_METRICS_CACHE[window_cache_key] = metrics
+    return metrics
 
 
 def build_harvest_back_windows(harvesting_date: date) -> list[tuple[str, date, date]]:
@@ -1735,6 +1809,54 @@ def resolve_forecast_reference_dates(
         )
         for year in reference_years
     ]
+
+
+def _build_all_climate_windows(
+    planting_week_1: tuple[date, date],
+    planting_week_2: tuple[date, date],
+    harvest_back_windows: list[tuple[str, date, date]],
+    intermediate_window: tuple[date, date] | None,
+) -> list[tuple[date, date]]:
+    windows = [planting_week_1, planting_week_2]
+    windows.extend((start_date, end_date) for _, start_date, end_date in harvest_back_windows)
+    if intermediate_window is not None:
+        windows.append(intermediate_window)
+    return windows
+
+
+def _compute_climate_window_metrics(
+    nasa_series: dict[str, dict[str, float | None]],
+    planting_week_1: tuple[date, date],
+    planting_week_2: tuple[date, date],
+    harvest_back_windows: list[tuple[str, date, date]],
+    intermediate_window: tuple[date, date] | None,
+) -> dict[str, float | None]:
+    year_metrics: dict[str, float | None] = {}
+
+    planting_week_1_metrics = aggregate_metrics(nasa_series, *planting_week_1)
+    year_metrics["planting_week_1_total_prectotcorr"] = planting_week_1_metrics["total_prectotcorr"]
+
+    planting_week_2_metrics = aggregate_metrics(nasa_series, *planting_week_2)
+    year_metrics["planting_week_2_total_prectotcorr"] = planting_week_2_metrics["total_prectotcorr"]
+    year_metrics["planting_week_2_avg_t2m"] = planting_week_2_metrics["avg_t2m"]
+
+    year_metrics["intermediate_period_total_prectotcorr"] = None
+    year_metrics["intermediate_period_avg_t2m"] = None
+    if intermediate_window is not None:
+        intermediate_metrics = aggregate_metrics(nasa_series, *intermediate_window)
+        intermediate_days = (intermediate_window[1] - intermediate_window[0]).days + 1
+        weekly_precipitation: float | None = None
+        if intermediate_metrics["total_prectotcorr"] is not None and intermediate_days > 0:
+            weekly_precipitation = (intermediate_metrics["total_prectotcorr"] / intermediate_days) * 7
+        year_metrics["intermediate_period_total_prectotcorr"] = weekly_precipitation
+        year_metrics["intermediate_period_avg_t2m"] = intermediate_metrics["avg_t2m"]
+
+    for week_name, week_start, week_end in harvest_back_windows:
+        metrics = aggregate_metrics(nasa_series, week_start, week_end)
+        year_metrics[f"{week_name}_total_prectotcorr"] = metrics["total_prectotcorr"]
+        year_metrics[f"{week_name}_avg_t2m"] = metrics["avg_t2m"]
+
+    return year_metrics
 
 
 def build_output_columns() -> list[str]:
@@ -1826,10 +1948,12 @@ def build_output_row(
                 planting_date,
                 harvesting_date,
             )
-            all_windows = [planting_week_1, planting_week_2]
-            all_windows.extend((start_date, end_date) for _, start_date, end_date in harvest_back_windows)
-            if intermediate_window is not None:
-                all_windows.append(intermediate_window)
+            all_windows = _build_all_climate_windows(
+                planting_week_1,
+                planting_week_2,
+                harvest_back_windows,
+                intermediate_window,
+            )
 
             start_date = min(window_start for window_start, _ in all_windows)
             end_date = max(window_end for _, window_end in all_windows)
@@ -1854,29 +1978,13 @@ def build_output_row(
                     cache_path=cache_path,
                     stats=cache_stats,
                 )
-            year_metrics: dict[str, float | None] = {}
-            planting_week_1_metrics = aggregate_metrics(nasa_series, *planting_week_1)
-            year_metrics["planting_week_1_total_prectotcorr"] = planting_week_1_metrics["total_prectotcorr"]
-
-            planting_week_2_metrics = aggregate_metrics(nasa_series, *planting_week_2)
-            year_metrics["planting_week_2_total_prectotcorr"] = planting_week_2_metrics["total_prectotcorr"]
-            year_metrics["planting_week_2_avg_t2m"] = planting_week_2_metrics["avg_t2m"]
-
-            year_metrics["intermediate_period_total_prectotcorr"] = None
-            year_metrics["intermediate_period_avg_t2m"] = None
-            if intermediate_window is not None:
-                intermediate_metrics = aggregate_metrics(nasa_series, *intermediate_window)
-                intermediate_days = (intermediate_window[1] - intermediate_window[0]).days + 1
-                weekly_precipitation: float | None = None
-                if intermediate_metrics["total_prectotcorr"] is not None and intermediate_days > 0:
-                    weekly_precipitation = (intermediate_metrics["total_prectotcorr"] / intermediate_days) * 7
-                year_metrics["intermediate_period_total_prectotcorr"] = weekly_precipitation
-                year_metrics["intermediate_period_avg_t2m"] = intermediate_metrics["avg_t2m"]
-
-            for week_name, week_start, week_end in harvest_back_windows:
-                metrics = aggregate_metrics(nasa_series, week_start, week_end)
-                year_metrics[f"{week_name}_total_prectotcorr"] = metrics["total_prectotcorr"]
-                year_metrics[f"{week_name}_avg_t2m"] = metrics["avg_t2m"]
+            year_metrics = _compute_climate_window_metrics(
+                nasa_series,
+                planting_week_1,
+                planting_week_2,
+                harvest_back_windows,
+                intermediate_window,
+            )
 
             per_year_metrics.append(year_metrics)
             audit_windows.append(
@@ -1937,10 +2045,12 @@ def build_output_row(
         harvesting_date,
     )
 
-    all_windows = [planting_week_1, planting_week_2]
-    all_windows.extend((start_date, end_date) for _, start_date, end_date in harvest_back_windows)
-    if intermediate_window is not None:
-        all_windows.append(intermediate_window)
+    all_windows = _build_all_climate_windows(
+        planting_week_1,
+        planting_week_2,
+        harvest_back_windows,
+        intermediate_window,
+    )
 
     start_date = min(window_start for window_start, _ in all_windows)
     end_date = max(window_end for _, window_end in all_windows)
@@ -1967,28 +2077,23 @@ def build_output_row(
             stats=cache_stats,
         )
 
-    planting_week_1_metrics = aggregate_metrics(nasa_series, *planting_week_1)
-    output_row["planting_week_1_total_prectotcorr"] = format_number(planting_week_1_metrics["total_prectotcorr"])
+    year_metrics = _compute_climate_window_metrics(
+        nasa_series,
+        planting_week_1,
+        planting_week_2,
+        harvest_back_windows,
+        intermediate_window,
+    )
+    output_row["planting_week_1_total_prectotcorr"] = format_number(year_metrics["planting_week_1_total_prectotcorr"])
+    output_row["planting_week_2_total_prectotcorr"] = format_number(year_metrics["planting_week_2_total_prectotcorr"])
+    output_row["planting_week_2_avg_t2m"] = format_number(year_metrics["planting_week_2_avg_t2m"])
+    output_row["intermediate_period_total_prectotcorr"] = format_number(year_metrics["intermediate_period_total_prectotcorr"])
+    output_row["intermediate_period_avg_t2m"] = format_number(year_metrics["intermediate_period_avg_t2m"])
 
-    planting_week_2_metrics = aggregate_metrics(nasa_series, *planting_week_2)
-    output_row["planting_week_2_total_prectotcorr"] = format_number(planting_week_2_metrics["total_prectotcorr"])
-    output_row["planting_week_2_avg_t2m"] = format_number(planting_week_2_metrics["avg_t2m"])
-
-    output_row["intermediate_period_total_prectotcorr"] = ""
-    output_row["intermediate_period_avg_t2m"] = ""
-    if intermediate_window is not None:
-        intermediate_metrics = aggregate_metrics(nasa_series, *intermediate_window)
-        intermediate_days = (intermediate_window[1] - intermediate_window[0]).days + 1
-        weekly_precipitation: float | None = None
-        if intermediate_metrics["total_prectotcorr"] is not None and intermediate_days > 0:
-            weekly_precipitation = (intermediate_metrics["total_prectotcorr"] / intermediate_days) * 7
-        output_row["intermediate_period_total_prectotcorr"] = format_number(weekly_precipitation)
-        output_row["intermediate_period_avg_t2m"] = format_number(intermediate_metrics["avg_t2m"])
-
-    for week_name, week_start, week_end in harvest_back_windows:
-        metrics = aggregate_metrics(nasa_series, week_start, week_end)
-        output_row[f"{week_name}_total_prectotcorr"] = format_number(metrics["total_prectotcorr"])
-        output_row[f"{week_name}_avg_t2m"] = format_number(metrics["avg_t2m"])
+    for week_idx in range(1, HARVEST_BACK_WEEKS + 1):
+        week_name = f"harvest_back_week_{week_idx}"
+        output_row[f"{week_name}_total_prectotcorr"] = format_number(year_metrics[f"{week_name}_total_prectotcorr"])
+        output_row[f"{week_name}_avg_t2m"] = format_number(year_metrics[f"{week_name}_avg_t2m"])
 
     audit_row.update(
         {

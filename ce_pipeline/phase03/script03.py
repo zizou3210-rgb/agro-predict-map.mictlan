@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Lock, RLock
+from collections import Counter
 from typing import Callable
 from urllib.request import Request, urlopen
 
@@ -178,6 +179,7 @@ CHIRPS_MAX_LATITUDE = 60.0
 CHIRTS_MIN_LATITUDE = -60.0
 CHIRTS_MAX_LATITUDE = 70.0
 MAX_OPEN_RASTERS = 12
+CLIMATE_FEATURE_CACHE_VERSION = 2
 CHC_GRID_STEP_DEGREES = 0.05
 CLIMATE_PIXEL_ID_HEADER = "Climate Pixel ID"
 _RASTER_IMAGE_CACHE: OrderedDict[Path, Image.Image] = OrderedDict()
@@ -187,6 +189,7 @@ _CHC_DOWNLOAD_PROGRESS_HOOK: Callable[[str, int, int, bool], None] | None = None
 _CHC_DOWNLOAD_PROGRESS_STATE: dict[str, int] = {"series_total": 0, "series_completed": 0, "series_total_days": 0, "download_max_processed_days": 0, "compute_max_processed_days": 0}
 _CHC_SERIES_AGGREGATION_CACHE: dict[int, dict[str, object]] = {}
 _CHC_WINDOW_METRICS_CACHE: dict[tuple[int, str, str], dict[str, float | None]] = {}
+_CHC_PIXEL_DAILY_SAMPLE_CACHE: dict[tuple[str, str, str], float | None] = {}
 _CHC_PREPARED_RASTER_PATHS: dict[tuple[str, str], Path] = {}
 _CHC_PARALLEL_PROGRESS_MODE = False
 _CHC_PARALLEL_PROGRESS_LOCK = Lock()
@@ -282,23 +285,87 @@ def build_climate_series_key(row: dict[str, object]) -> tuple[str, str, str]:
 
 
 def serialize_climate_series_key(series_key: tuple[str, str, str]) -> str:
-    return "|".join(series_key)
+    pixel_id, planting_value, harvesting_value = series_key
+    return f"v{CLIMATE_FEATURE_CACHE_VERSION}|{pixel_id}|{planting_value}|{harvesting_value}"
+
+
+def deserialize_climate_series_key(serialized_key: str) -> tuple[str, str, str] | None:
+    parts = str(serialized_key or '').split('|')
+    if len(parts) != 4:
+        return None
+    version_tag, pixel_id, planting_value, harvesting_value = parts
+    if version_tag != f"v{CLIMATE_FEATURE_CACHE_VERSION}":
+        return None
+    if not pixel_id or not planting_value or not harvesting_value:
+        return None
+    return pixel_id, planting_value, harvesting_value
+
+
+def build_climate_series_groups(
+    rows: list[dict[str, str]],
+) -> dict[tuple[str, str, str], list[dict[str, str]]]:
+    grouped_rows: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    for row in rows:
+        series_key = build_climate_series_key(row)
+        grouped_rows.setdefault(series_key, []).append(row)
+    return grouped_rows
+
+
+def _normalize_feature_cache_entry(
+    serialized_key: str,
+    value: object,
+) -> dict[str, object] | None:
+    series_key = deserialize_climate_series_key(serialized_key)
+    if series_key is None or not isinstance(value, dict):
+        return None
+
+    output_row = value.get('output_row')
+    audit_row = value.get('audit_row')
+    if not isinstance(output_row, dict) or not isinstance(audit_row, dict):
+        return None
+
+    stored_series_key = value.get('series_key')
+    expected_series_key = {
+        'pixel_id': series_key[0],
+        'date_of_planting': series_key[1],
+        'date_of_harvesting': series_key[2],
+    }
+    if stored_series_key is not None and stored_series_key != expected_series_key:
+        return None
+
+    return {
+        'series_key': expected_series_key,
+        'output_row': dict(output_row),
+        'audit_row': dict(audit_row),
+    }
 
 
 def load_climate_feature_cache(path: Path) -> dict[str, dict[str, object]]:
     raw_payload = ea_pipeline.load_json_file(path, default={})
     if not isinstance(raw_payload, dict):
         return {}
+
+    payload_version = raw_payload.get('cache_version')
+    raw_entries = raw_payload.get('entries')
+    if payload_version != CLIMATE_FEATURE_CACHE_VERSION or not isinstance(raw_entries, dict):
+        return {}
+
     cache: dict[str, dict[str, object]] = {}
-    for key, value in raw_payload.items():
-        if not isinstance(key, str) or not isinstance(value, dict):
+    for key, value in raw_entries.items():
+        if not isinstance(key, str):
             continue
-        cache[key] = value
+        normalized = _normalize_feature_cache_entry(key, value)
+        if normalized is not None:
+            cache[key] = normalized
     return cache
 
 
 def save_climate_feature_cache(path: Path, cache: dict[str, dict[str, object]]) -> None:
-    ea_pipeline.save_json_file(path, cache)
+    payload = {
+        'cache_version': CLIMATE_FEATURE_CACHE_VERSION,
+        'entries': cache,
+    }
+    ea_pipeline.save_json_file(path, payload)
 
 
 def _resolve_raster_request(dataset: str, current_date: date, cache_dir: Path) -> tuple[Path, str]:
@@ -402,6 +469,36 @@ def _get_raster_metadata(path: Path) -> tuple[float, float, float, float, int, i
         metadata = (origin_x, origin_y, x_scale, y_scale, int(image.size[0]), int(image.size[1]))
         _RASTER_METADATA_CACHE[path] = metadata
         return metadata
+
+
+def _sample_chc_dataset_value(
+    dataset: str,
+    path: Path,
+    *,
+    pixel_id: str,
+    current_date: date,
+    latitude: float,
+    longitude: float,
+    fill_value: float,
+    latitude_min: float,
+    latitude_max: float,
+) -> float | None:
+    cache_key = (dataset, pixel_id, current_date.isoformat())
+    with _RASTER_CACHE_LOCK:
+        if cache_key in _CHC_PIXEL_DAILY_SAMPLE_CACHE:
+            return _CHC_PIXEL_DAILY_SAMPLE_CACHE[cache_key]
+
+    value = _sample_raster_value(
+        path,
+        latitude=latitude,
+        longitude=longitude,
+        fill_value=fill_value,
+        latitude_min=latitude_min,
+        latitude_max=latitude_max,
+    )
+    with _RASTER_CACHE_LOCK:
+        _CHC_PIXEL_DAILY_SAMPLE_CACHE[cache_key] = value
+    return value
 
 
 def _sample_raster_value(
@@ -703,24 +800,33 @@ def fetch_chc_series(
             chirps_path, chirps_downloaded = _resolve_raster_path('chirps', current_date, cache_dir)
             tmax_path, tmax_downloaded = _resolve_raster_path('chirts_tmax', current_date, cache_dir)
             tmin_path, tmin_downloaded = _resolve_raster_path('chirts_tmin', current_date, cache_dir)
-        precip = _sample_raster_value(
+        precip = _sample_chc_dataset_value(
+            'chirps',
             chirps_path,
+            pixel_id=pixel_id,
+            current_date=current_date,
             latitude=lat_value,
             longitude=lon_value,
             fill_value=CHIRPS_FILL_VALUE,
             latitude_min=CHIRPS_MIN_LATITUDE,
             latitude_max=CHIRPS_MAX_LATITUDE,
         )
-        tmax = _sample_raster_value(
+        tmax = _sample_chc_dataset_value(
+            'chirts_tmax',
             tmax_path,
+            pixel_id=pixel_id,
+            current_date=current_date,
             latitude=lat_value,
             longitude=lon_value,
             fill_value=CHIRTS_FILL_VALUE,
             latitude_min=CHIRTS_MIN_LATITUDE,
             latitude_max=CHIRTS_MAX_LATITUDE,
         )
-        tmin = _sample_raster_value(
+        tmin = _sample_chc_dataset_value(
+            'chirts_tmin',
             tmin_path,
+            pixel_id=pixel_id,
+            current_date=current_date,
             latitude=lat_value,
             longitude=lon_value,
             fill_value=CHIRTS_FILL_VALUE,
@@ -837,91 +943,138 @@ def normalize_phase02_dates(
     return output_records, {"dropped_missing_or_invalid_date_rows": dropped_rows}
 
 
+def resolve_phase03_soil_worker_limit(point_total: int) -> int:
+    raw_value = str(os.environ.get("APP_PHASE03_SOIL_MAX_WORKERS", "")).strip()
+    if raw_value:
+        try:
+            configured = max(1, int(raw_value))
+        except ValueError:
+            configured = 1
+        return max(1, min(configured, max(point_total, 1)))
+
+    if sys.platform == "darwin":
+        default_limit = 2
+    else:
+        default_limit = 4
+    return max(1, min(default_limit, max(point_total, 1)))
+
+
+def _build_soil_point_tasks(
+    records: list[dict[str, object]],
+) -> tuple[list[tuple[str, float, float]], Counter[str]]:
+    point_counts: Counter[str] = Counter()
+    point_coordinates: dict[str, tuple[float, float]] = {}
+    for record in records:
+        latitude = soil_enrichment.parse_float(record.get(LAT_HEADER))
+        longitude = soil_enrichment.parse_float(record.get(LON_HEADER))
+        if latitude is None or longitude is None:
+            continue
+        point_id = soil_enrichment.cache_key(latitude, longitude)
+        point_counts[point_id] += 1
+        point_coordinates.setdefault(point_id, (latitude, longitude))
+
+    tasks = [
+        (point_id, point_coordinates[point_id][0], point_coordinates[point_id][1])
+        for point_id in point_coordinates
+    ]
+    return tasks, point_counts
+
+
 def enrich_soils(
     records: list[dict[str, object]],
     cache_path: Path,
     *,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
-    enriched_rows = 0
+    total_rows = len(records)
+    point_tasks, point_counts = _build_soil_point_tasks(records)
+    total_points = len(point_tasks)
+    worker_count = resolve_phase03_soil_worker_limit(total_points) if total_points > 1 else 1
+
+    output_records: list[dict[str, object]] = []
+    resolved_points: dict[str, dict[str, object]] = {}
     cache_hit_cells = 0
     service_success_cells = 0
     fallback_cells = 0
-    resolved_points: dict[str, dict[str, object]] = {}
-    output_records: list[dict[str, object]] = []
-    total_rows = len(records)
-    soil_cache_payload = soil_enrichment.normalize_cache_payload(soil_enrichment.load_cache_payload(cache_path))
     cache_changed = False
-    pending_cache_writes = 0
-    flush_every_new_points = 25
 
-    for index, record in enumerate(records, start=1):
+    payload_lock = Lock()
+    progress_lock = Lock()
+    soil_cache_payload = soil_enrichment.normalize_cache_payload(soil_enrichment.load_cache_payload(cache_path))
+    processed_points = 0
+
+    def report_progress() -> None:
+        if not progress_callback:
+            return
+        with progress_lock:
+            processed_rows = sum(point_counts.get(point_id, 0) for point_id in resolved_points)
+            percent = 94 + round((processed_rows / total_rows) * 3) if total_rows else 94
+            progress_callback(
+                percent,
+                "Enriching soils",
+                f"Resolving soil data for {processed_rows}/{total_rows} prediction rows.",
+                {
+                    "phase": "phase03",
+                    "soil_processed_rows": processed_rows,
+                    "soil_total_rows": total_rows,
+                    "soil_cache_hits": cache_hit_cells,
+                    "soil_service_success_cells": service_success_cells,
+                    "soil_fallback_cells": fallback_cells,
+                    "soil_parallel_workers": worker_count,
+                    "soil_unique_points_total": total_points,
+                    "soil_unique_points_processed": processed_points,
+                },
+            )
+
+    def resolve_point(task: tuple[str, float, float]) -> tuple[str, dict[str, object], str, bool]:
+        point_id, latitude, longitude = task
+        with payload_lock:
+            return (point_id, *soil_enrichment.resolve_soil_record_from_payload(
+                latitude,
+                longitude,
+                payload=soil_cache_payload,
+            ))
+
+    if point_tasks:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {executor.submit(resolve_point, task): task[0] for task in point_tasks}
+            for future in as_completed(future_map):
+                point_id, soil_record, resolved_source, point_cache_changed = future.result()
+                resolved_points[point_id] = soil_record
+                processed_points += 1
+                cache_changed = cache_changed or point_cache_changed
+                if resolved_source == "cache_hit":
+                    cache_hit_cells += 1
+                elif resolved_source == "soilgrids":
+                    service_success_cells += 1
+                if soil_record.get("soil_source") == "fallback_default":
+                    fallback_cells += 1
+                report_progress()
+
+    if cache_changed:
+        soil_enrichment.write_cache_payload(cache_path, soil_cache_payload)
+
+    enriched_rows = 0
+    for record in records:
         updated = dict(record)
         latitude = soil_enrichment.parse_float(updated.get(LAT_HEADER))
         longitude = soil_enrichment.parse_float(updated.get(LON_HEADER))
         if latitude is None or longitude is None:
             output_records.append(updated)
-            if progress_callback:
-                percent = 94 + round((index / total_rows) * 3) if total_rows else 94
-                progress_callback(
-                    percent,
-                    "Enriching soils",
-                    f"Resolving soil data for {index}/{total_rows} prediction rows.",
-                    {
-                        "phase": "phase03",
-                        "soil_processed_rows": index,
-                        "soil_total_rows": total_rows,
-                        "soil_cache_hits": cache_hit_cells,
-                        "soil_service_success_cells": service_success_cells,
-                        "soil_fallback_cells": fallback_cells,
-                    },
-                )
             continue
-        cell_id = soil_enrichment.cache_key(latitude, longitude)
-        if cell_id not in resolved_points:
-            soil_record, resolved_source, point_cache_changed = soil_enrichment.resolve_soil_record_from_payload(
-                latitude,
-                longitude,
-                payload=soil_cache_payload,
-            )
-            resolved_points[cell_id] = soil_record
-            cache_changed = cache_changed or point_cache_changed
-            if point_cache_changed:
-                pending_cache_writes += 1
-                if pending_cache_writes >= flush_every_new_points:
-                    soil_enrichment.write_cache_payload(cache_path, soil_cache_payload)
-                    pending_cache_writes = 0
-            if resolved_source == "cache_hit":
-                cache_hit_cells += 1
-            elif resolved_source == "soilgrids":
-                service_success_cells += 1
-            if soil_record.get("soil_source") == "fallback_default":
-                fallback_cells += 1
-        soil_record = resolved_points[cell_id]
+        point_id = soil_enrichment.cache_key(latitude, longitude)
+        soil_record = resolved_points.get(point_id)
+        if soil_record is None:
+            output_records.append(updated)
+            continue
         updated[SOIL_TEXTURE_HEADER] = soil_record[SOIL_TEXTURE_HEADER]
         updated[SOIL_DEPTH_HEADER] = soil_record[SOIL_DEPTH_HEADER]
         updated["soil_source"] = soil_record.get("soil_source", "")
         updated["soil_texture_usda_class"] = soil_record.get("soil_texture_usda_class", "")
         output_records.append(updated)
         enriched_rows += 1
-        if progress_callback:
-            percent = 94 + round((index / total_rows) * 3) if total_rows else 94
-            progress_callback(
-                percent,
-                "Enriching soils",
-                f"Resolving soil data for {index}/{total_rows} prediction rows.",
-                {
-                    "phase": "phase03",
-                    "soil_processed_rows": index,
-                    "soil_total_rows": total_rows,
-                    "soil_cache_hits": cache_hit_cells,
-                    "soil_service_success_cells": service_success_cells,
-                    "soil_fallback_cells": fallback_cells,
-                },
-            )
 
-    if cache_changed:
-        soil_enrichment.write_cache_payload(cache_path, soil_cache_payload)
+    report_progress()
 
     return output_records, {
         "soil_enriched_rows": enriched_rows,
@@ -930,6 +1083,8 @@ def enrich_soils(
         "soil_cache_hits": cache_hit_cells,
         "soil_service_queries": max(len(resolved_points) - cache_hit_cells, 0),
         "soil_service_success_cells": service_success_cells,
+        "soil_parallel_workers": worker_count,
+        "soil_unique_points_total": total_points,
     }
 
 
@@ -1126,12 +1281,8 @@ def build_phase02_records_parallel_workspace(
     initial_cache_size = len(cache)
     output_columns = ea_pipeline.build_output_columns()
 
-    grouped_row_indexes: dict[tuple[str, str, str], list[int]] = {}
-    representative_rows: dict[tuple[str, str, str], dict[str, str]] = {}
-    for index, row in enumerate(data_input_rows):
-        series_key = build_climate_series_key(row)
-        grouped_row_indexes.setdefault(series_key, []).append(index)
-        representative_rows.setdefault(series_key, row)
+    grouped_rows = build_climate_series_groups(data_input_rows)
+    representative_rows = {series_key: rows[0] for series_key, rows in grouped_rows.items()}
 
     unique_series_items = list(representative_rows.items())
     total_unique_series = len(unique_series_items)
@@ -1191,6 +1342,11 @@ def build_phase02_records_parallel_workspace(
         local_stats["feature_cache_hits"] = 0
         local_stats["feature_cache_misses"] = 1
         local_stats["feature_cache_payload"] = {
+            "series_key": {
+                "pixel_id": series_key[0],
+                "date_of_planting": series_key[1],
+                "date_of_harvesting": series_key[2],
+            },
             "output_row": dict(output_row),
             "audit_row": dict(audit_row),
         }
@@ -1350,6 +1506,8 @@ def build_phase02_records_parallel_workspace(
         "parallel_unique_climate_series": total_unique_series,
         "parallel_progress_series_total": progress_series_total,
         "parallel_workers": worker_count,
+        "climate_series_group_count": len(grouped_rows),
+        "climate_feature_cache_version": CLIMATE_FEATURE_CACHE_VERSION,
         **locality_metadata,
     }
     ea_pipeline.write_metadata(output_dir / "metadata.json", metadata)
@@ -1665,6 +1823,7 @@ def create_phase03_workbook(
     global _CHC_DOWNLOAD_PROGRESS_STATE
     global _CHC_SERIES_AGGREGATION_CACHE
     global _CHC_WINDOW_METRICS_CACHE
+    global _CHC_PIXEL_DAILY_SAMPLE_CACHE
     global _CHC_PREPARED_RASTER_PATHS
     original_chc_download_progress_hook = _CHC_DOWNLOAD_PROGRESS_HOOK
     original_chc_download_progress_state = dict(_CHC_DOWNLOAD_PROGRESS_STATE)
@@ -1692,6 +1851,7 @@ def create_phase03_workbook(
     ea_pipeline.aggregate_metrics = aggregate_metrics_fast
     _CHC_SERIES_AGGREGATION_CACHE = {}
     _CHC_WINDOW_METRICS_CACHE = {}
+    _CHC_PIXEL_DAILY_SAMPLE_CACHE = {}
     _CHC_DOWNLOAD_PROGRESS_HOOK = chc_download_progress_callback
     try:
         with patched_phase02_output_dir(output_dir):
@@ -1714,6 +1874,7 @@ def create_phase03_workbook(
         _CHC_PREPARED_RASTER_PATHS = original_prepared_raster_paths
         _CHC_SERIES_AGGREGATION_CACHE = {}
         _CHC_WINDOW_METRICS_CACHE = {}
+        _CHC_PIXEL_DAILY_SAMPLE_CACHE = {}
         buffered_cache_writer.flush()
 
     write_progress(
