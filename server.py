@@ -1709,13 +1709,24 @@ def get_missing_pipeline_modules(python_exec: Path) -> list[str]:
         "missing=[name for name in mods if importlib.util.find_spec(name) is None]; "
         "print(json.dumps(missing))"
     )
-    result = subprocess.run(
-        [str(python_exec), "-c", probe],
-        check=True,
-        capture_output=True,
-        text=True,
-        cwd=str(APP_DIR),
-    )
+    try:
+        result = subprocess.run(
+            [str(python_exec), "-c", probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=str(APP_DIR),
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        stderr = ""
+        stdout = ""
+        if isinstance(exc, subprocess.CalledProcessError):
+            stderr = str(exc.stderr or "").strip()
+            stdout = str(exc.stdout or "").strip()
+        details = stderr or stdout or str(exc)
+        raise RuntimeError(
+            f"Unable to inspect pipeline dependencies for {python_exec}: {details}"
+        ) from exc
     payload = result.stdout.strip() or '[]'
     try:
         missing = json.loads(payload)
@@ -1755,9 +1766,20 @@ def ensure_pipeline_python_ready(python_exec: Path) -> Path:
 
 
 def resolve_pipeline_python() -> Path:
+    attempted_errors: list[str] = []
     for candidate in get_preferred_pipeline_pythons():
-        if candidate and candidate.exists():
+        if not candidate or not candidate.exists():
+            continue
+        try:
             return ensure_pipeline_python_ready(candidate)
+        except Exception as exc:
+            attempted_errors.append(f"{candidate}: {exc}")
+            continue
+    if attempted_errors:
+        raise RuntimeError(
+            "No local Python interpreter with the app pipeline dependencies could be prepared. Tried: "
+            + " | ".join(attempted_errors)
+        )
     raise FileNotFoundError(
         "No local Python interpreter with the app pipeline dependencies was found."
     )

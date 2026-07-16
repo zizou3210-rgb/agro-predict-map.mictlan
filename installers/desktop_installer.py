@@ -662,6 +662,7 @@ def install_windows() -> str:
     packaged_launcher = install_root / WINDOWS_LAUNCHER_NAME
     packaged_uninstaller = install_root / WINDOWS_UNINSTALLER_NAME
     installed_launcher = resolve_installed_app_dir() / WINDOWS_LAUNCHER_NAME
+    installed_installers_launcher = resolve_installed_installers_dir() / WINDOWS_LAUNCHER_NAME
     installed_uninstaller = resolve_installed_installers_dir() / WINDOWS_UNINSTALLER_NAME
     shortcut_python = resolve_windows_shortcut_python(launch_python)
     shortcut_icon = export_windows_shortcut_icon(resolve_installed_app_dir(), launch_python)
@@ -671,8 +672,15 @@ def install_windows() -> str:
     write_windows_cmd(packaged_launcher, launch_command)
     write_windows_cmd(packaged_uninstaller, uninstall_command)
     write_windows_cmd(installed_launcher, launch_command)
+    write_windows_cmd(installed_installers_launcher, launch_command)
     write_windows_cmd(installed_uninstaller, uninstall_command)
-    created_files.extend([packaged_launcher, packaged_uninstaller, installed_launcher, installed_uninstaller])
+    created_files.extend([
+        packaged_launcher,
+        packaged_uninstaller,
+        installed_launcher,
+        installed_installers_launcher,
+        installed_uninstaller,
+    ])
     targets = windows_targets()
     for path in targets[:2]:
         write_windows_shortcut(
