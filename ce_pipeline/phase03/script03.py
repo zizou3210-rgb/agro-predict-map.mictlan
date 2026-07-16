@@ -303,12 +303,14 @@ def deserialize_climate_series_key(serialized_key: str) -> tuple[str, str, str] 
 
 def build_climate_series_groups(
     rows: list[dict[str, str]],
-) -> dict[tuple[str, str, str], list[dict[str, str]]]:
+) -> tuple[dict[tuple[str, str, str], list[dict[str, str]]], list[tuple[str, str, str]]]:
     grouped_rows: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    row_series_keys: list[tuple[str, str, str]] = []
     for row in rows:
         series_key = build_climate_series_key(row)
+        row_series_keys.append(series_key)
         grouped_rows.setdefault(series_key, []).append(row)
-    return grouped_rows
+    return grouped_rows, row_series_keys
 
 
 def _normalize_feature_cache_entry(
@@ -645,11 +647,15 @@ def collect_required_chc_dates(
             add_pair(planting_date, harvesting_date)
         return sorted(unique_dates)
 
+    unique_date_pairs: set[tuple[str, str]] = set()
     for record in records:
         planting_value = str(record.get("date_of_planting") or "").strip()
         harvesting_value = str(record.get("date_of_harvesting") or "").strip()
         if not planting_value or not harvesting_value:
             continue
+        unique_date_pairs.add((planting_value, harvesting_value))
+
+    for planting_value, harvesting_value in sorted(unique_date_pairs):
         add_pair(ea_pipeline.parse_iso_date(planting_value), ea_pipeline.parse_iso_date(harvesting_value))
     return sorted(unique_dates)
 
@@ -1281,7 +1287,7 @@ def build_phase02_records_parallel_workspace(
     initial_cache_size = len(cache)
     output_columns = ea_pipeline.build_output_columns()
 
-    grouped_rows = build_climate_series_groups(data_input_rows)
+    grouped_rows, row_series_keys = build_climate_series_groups(data_input_rows)
     representative_rows = {series_key: rows[0] for series_key, rows in grouped_rows.items()}
 
     unique_series_items = list(representative_rows.items())
@@ -1403,8 +1409,7 @@ def build_phase02_records_parallel_workspace(
 
     output_rows: list[dict[str, str]] = []
     audit_rows: list[dict[str, str]] = []
-    for row in data_input_rows:
-        series_key = build_climate_series_key(row)
+    for row, series_key in zip(data_input_rows, row_series_keys):
         template_output, template_audit = representative_results[series_key]
         output_row = {column: row[column] for column in ea_pipeline.CLIMATE_ID_COLUMNS}
         for header in output_columns:
@@ -1508,6 +1513,8 @@ def build_phase02_records_parallel_workspace(
         "parallel_workers": worker_count,
         "climate_series_group_count": len(grouped_rows),
         "climate_feature_cache_version": CLIMATE_FEATURE_CACHE_VERSION,
+        "unique_date_pair_count": len({(str(row.get("date_of_planting") or "").strip(), str(row.get("date_of_harvesting") or "").strip()) for row in data_input_rows if str(row.get("date_of_planting") or "").strip() and str(row.get("date_of_harvesting") or "").strip()}),
+        "unique_climate_query_key_count": total_unique_series,
         **locality_metadata,
     }
     ea_pipeline.write_metadata(output_dir / "metadata.json", metadata)

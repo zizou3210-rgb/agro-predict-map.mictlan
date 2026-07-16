@@ -9,6 +9,7 @@ import re
 import shutil
 import statistics
 import time
+from functools import lru_cache
 from threading import RLock
 from datetime import date, datetime, time as dt_time, timedelta
 from difflib import SequenceMatcher
@@ -1786,6 +1787,42 @@ def build_climate_windows(
     return planting_week_1, planting_week_2, harvest_back_windows, intermediate_window
 
 
+@lru_cache(maxsize=4096)
+def resolve_cached_climate_window_payload(
+    planting_date_iso: str,
+    harvesting_date_iso: str,
+) -> tuple[
+    tuple[date, date],
+    tuple[date, date],
+    tuple[tuple[str, date, date], ...],
+    tuple[date, date] | None,
+    date,
+    date,
+]:
+    planting_date = parse_iso_date(planting_date_iso)
+    harvesting_date = parse_iso_date(harvesting_date_iso)
+    planting_week_1, planting_week_2, harvest_back_windows, intermediate_window = build_climate_windows(
+        planting_date,
+        harvesting_date,
+    )
+    all_windows = _build_all_climate_windows(
+        planting_week_1,
+        planting_week_2,
+        harvest_back_windows,
+        intermediate_window,
+    )
+    start_date = min(window_start for window_start, _ in all_windows)
+    end_date = max(window_end for _, window_end in all_windows)
+    return (
+        planting_week_1,
+        planting_week_2,
+        tuple(harvest_back_windows),
+        intermediate_window,
+        start_date,
+        end_date,
+    )
+
+
 def average_metric_values(values: list[float | None]) -> float | None:
     numeric_values = [value for value in values if value is not None]
     if not numeric_values:
@@ -2038,22 +2075,17 @@ def build_output_row(
         audit_row["selected_model_id"] = selected_model_id
         return output_row, audit_row
 
-    planting_date = parse_iso_date(row["date_of_planting"])
-    harvesting_date = parse_iso_date(row["date_of_harvesting"])
-    planting_week_1, planting_week_2, harvest_back_windows, intermediate_window = build_climate_windows(
-        planting_date,
-        harvesting_date,
-    )
-
-    all_windows = _build_all_climate_windows(
+    (
         planting_week_1,
         planting_week_2,
         harvest_back_windows,
         intermediate_window,
+        start_date,
+        end_date,
+    ) = resolve_cached_climate_window_payload(
+        str(row["date_of_planting"]),
+        str(row["date_of_harvesting"]),
     )
-
-    start_date = min(window_start for window_start, _ in all_windows)
-    end_date = max(window_end for _, window_end in all_windows)
     if climate_scope == "regional_country" and not manual_grid_point_mode:
         regional_label, regional_tiles = resolve_regional_source()
         nasa_series, tile_count = fetch_nasa_regional_series(
