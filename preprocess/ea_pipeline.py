@@ -4,11 +4,14 @@ from __future__ import annotations
 import argparse
 import calendar
 import csv
+import ctypes
 import json
+import os
 import re
 import shutil
 import statistics
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import lru_cache
 from threading import RLock
 from datetime import date, datetime, time as dt_time, timedelta
@@ -54,6 +57,7 @@ SIMILARITY_THRESHOLD = 0.86
 _NASA_SERIES_AGGREGATION_CACHE: dict[int, dict[str, object]] = {}
 _NASA_WINDOW_METRICS_CACHE: dict[tuple[int, str, str], dict[str, float | None]] = {}
 _NASA_AGGREGATION_LOCK = RLock()
+_NASA_CACHE_WRITE_LOCK = RLock()
 
 PHASE_DIRS = {
     "phase00": ROOT_DIR / "phase00_selected_input",
@@ -453,6 +457,25 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
         writer.writerows(rows)
 
 
+def append_csv_rows(
+    path: Path,
+    fieldnames: list[str],
+    rows: list[dict[str, str]],
+    *,
+    write_header: bool = False,
+) -> None:
+    if not rows and not write_header:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "w" if write_header else "a"
+    with path.open(mode, newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        if rows:
+            writer.writerows(rows)
+
+
 def write_metadata(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -467,6 +490,136 @@ def load_json_file(path: Path, default: Any) -> Any:
 def save_json_file(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _get_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value == "":
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value == "":
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
+def resolve_phase02_batch_size() -> int:
+    return max(1, _get_int_env("APP_PREPROCESS_PHASE02_BATCH_SIZE", 200))
+
+
+def resolve_phase02_worker_limit(total_groups: int) -> int:
+    configured = _get_int_env("APP_PREPROCESS_PHASE02_WORKERS", 2 if os.name == "nt" else 4)
+    return max(1, min(configured, max(1, total_groups)))
+
+
+def resolve_phase02_max_memory_percent() -> int:
+    return max(0, _get_int_env("APP_PREPROCESS_PHASE02_MAX_MEMORY_PERCENT", 0))
+
+
+def resolve_phase02_min_available_memory_mb() -> int:
+    return max(0, _get_int_env("APP_PREPROCESS_PHASE02_MIN_AVAILABLE_MEMORY_MB", 0))
+
+
+def resolve_phase02_memory_check_seconds() -> float:
+    return max(0.1, _get_float_env("APP_PREPROCESS_PHASE02_MEMORY_CHECK_SECONDS", 1.0))
+
+
+def resolve_nasa_aggregation_cache_max_entries() -> int:
+    return max(64, _get_int_env("APP_PREPROCESS_NASA_AGGREGATION_CACHE_MAX_ENTRIES", 512))
+
+
+def resolve_nasa_window_cache_max_entries() -> int:
+    return max(128, _get_int_env("APP_PREPROCESS_NASA_WINDOW_CACHE_MAX_ENTRIES", 4096))
+
+
+def get_system_memory_status() -> dict[str, float] | None:
+    try:
+        if os.name == "nt":
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            memory_status = MEMORYSTATUSEX()
+            memory_status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory_status)):
+                return None
+            total_bytes = float(memory_status.ullTotalPhys)
+            available_bytes = float(memory_status.ullAvailPhys)
+            used_percent = float(memory_status.dwMemoryLoad)
+        else:
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            total_pages = os.sysconf("SC_PHYS_PAGES")
+            available_pages = os.sysconf("SC_AVPHYS_PAGES")
+            total_bytes = float(page_size * total_pages)
+            available_bytes = float(page_size * available_pages)
+            used_percent = ((total_bytes - available_bytes) / total_bytes * 100.0) if total_bytes > 0 else 0.0
+    except (AttributeError, OSError, ValueError):
+        return None
+
+    return {
+        "total_mb": total_bytes / (1024.0 * 1024.0),
+        "available_mb": available_bytes / (1024.0 * 1024.0),
+        "used_percent": used_percent,
+    }
+
+
+def memory_allows_new_phase02_task(*, active_workers: int) -> tuple[bool, dict[str, float | int | bool]]:
+    max_memory_percent = resolve_phase02_max_memory_percent()
+    min_available_mb = resolve_phase02_min_available_memory_mb()
+    memory_guard_enabled = bool(max_memory_percent or min_available_mb)
+    status = get_system_memory_status()
+    if not memory_guard_enabled or status is None:
+        return True, {
+            "memory_guard_enabled": memory_guard_enabled,
+            "memory_status_available": status is not None,
+        }
+    if active_workers <= 0:
+        return True, {
+            "memory_guard_enabled": True,
+            "memory_status_available": True,
+            "memory_forced_single_start": True,
+            **status,
+        }
+
+    effective_max_memory_percent = float(max_memory_percent)
+    effective_min_available_mb = float(min_available_mb)
+    if os.name == "nt":
+        if max_memory_percent > 0:
+            effective_max_memory_percent = max(1.0, float(max_memory_percent) - 10.0)
+        if min_available_mb > 0:
+            effective_min_available_mb = float(min_available_mb) + 768.0
+
+    used_percent = float(status["used_percent"])
+    available_mb = float(status["available_mb"])
+    percent_ok = max_memory_percent <= 0 or used_percent < effective_max_memory_percent
+    available_ok = min_available_mb <= 0 or available_mb > effective_min_available_mb
+    return percent_ok and available_ok, {
+        "memory_guard_enabled": True,
+        "memory_status_available": True,
+        "memory_max_percent": max_memory_percent,
+        "memory_min_available_mb": min_available_mb,
+        "memory_effective_max_percent": effective_max_memory_percent,
+        "memory_effective_min_available_mb": effective_min_available_mb,
+        **status,
+    }
 
 
 def path_for_metadata(path: Path) -> str:
@@ -1460,7 +1613,16 @@ def save_nasa_cache(
     cache: dict[tuple[str, str, str, str], dict[str, dict[str, float | None]]],
 ) -> None:
     serialized = {"|".join(key): value for key, value in sorted(cache.items())}
-    save_json_file(path, serialized)
+    with _NASA_CACHE_WRITE_LOCK:
+        save_json_file(path, serialized)
+
+
+def _bounded_cache_store(cache: dict[Any, Any], key: Any, value: Any, max_entries: int) -> None:
+    cache[key] = value
+    overflow = len(cache) - max_entries
+    while overflow > 0:
+        cache.pop(next(iter(cache)))
+        overflow -= 1
 
 
 def parse_retry_after_seconds(error: HTTPError) -> float | None:
@@ -1696,7 +1858,12 @@ def _build_nasa_series_aggregation_cache(
         "precipitation_prefix_sum": precipitation_prefix_sum,
     }
     with _NASA_AGGREGATION_LOCK:
-        _NASA_SERIES_AGGREGATION_CACHE[cache_key] = prepared
+        _bounded_cache_store(
+            _NASA_SERIES_AGGREGATION_CACHE,
+            cache_key,
+            prepared,
+            resolve_nasa_aggregation_cache_max_entries(),
+        )
     return prepared
 
 
@@ -1714,42 +1881,29 @@ def aggregate_metrics(
     if cached_window_metrics is not None:
         return cached_window_metrics
 
-    prepared = _build_nasa_series_aggregation_cache(nasa_series)
-    key_to_index = prepared["key_to_index"]
-    start_key = format_nasa_date(start_date)
-    end_key = format_nasa_date(end_date)
-    start_index = key_to_index.get(start_key)
-    end_index = key_to_index.get(end_key)
+    temperatures: list[float] = []
+    precipitations: list[float] = []
+    for current_date in daterange(start_date, end_date):
+        key = format_nasa_date(current_date)
+        temperature = nasa_series["T2M"].get(key)
+        precipitation = nasa_series["PRECTOTCORR"].get(key)
+        if temperature is not None:
+            temperatures.append(temperature)
+        if precipitation is not None:
+            precipitations.append(precipitation)
 
-    if start_index is None or end_index is None or end_index < start_index:
-        temperatures: list[float] = []
-        precipitations: list[float] = []
-        for current_date in daterange(start_date, end_date):
-            key = format_nasa_date(current_date)
-            temperature = nasa_series["T2M"].get(key)
-            precipitation = nasa_series["PRECTOTCORR"].get(key)
-            if temperature is not None:
-                temperatures.append(temperature)
-            if precipitation is not None:
-                precipitations.append(precipitation)
-        metrics = {
-            "avg_t2m": (sum(temperatures) / len(temperatures)) if temperatures else None,
-            "total_prectotcorr": sum(precipitations) if precipitations else None,
-        }
-    else:
-        temperature_prefix_sum = prepared["temperature_prefix_sum"]
-        temperature_prefix_count = prepared["temperature_prefix_count"]
-        precipitation_prefix_sum = prepared["precipitation_prefix_sum"]
-        temperature_sum = temperature_prefix_sum[end_index + 1] - temperature_prefix_sum[start_index]
-        temperature_count = temperature_prefix_count[end_index + 1] - temperature_prefix_count[start_index]
-        precipitation_sum = precipitation_prefix_sum[end_index + 1] - precipitation_prefix_sum[start_index]
-        metrics = {
-            "avg_t2m": (temperature_sum / temperature_count) if temperature_count else None,
-            "total_prectotcorr": precipitation_sum if precipitation_sum != 0.0 else 0.0,
-        }
+    metrics = {
+        "avg_t2m": (sum(temperatures) / len(temperatures)) if temperatures else None,
+        "total_prectotcorr": sum(precipitations) if precipitations else None,
+    }
 
     with _NASA_AGGREGATION_LOCK:
-        _NASA_WINDOW_METRICS_CACHE[window_cache_key] = metrics
+        _bounded_cache_store(
+            _NASA_WINDOW_METRICS_CACHE,
+            window_cache_key,
+            metrics,
+            resolve_nasa_window_cache_max_entries(),
+        )
     return metrics
 
 
@@ -2179,6 +2333,50 @@ def build_phase02_headers(headers: list[str], target_header: str = YIELD_HEADER)
     return output_headers[:insert_at] + CLIMATE_HEADERS_WITH_UNITS + output_headers[insert_at:]
 
 
+def serialize_phase02_group_key(
+    row: dict[str, str],
+    climate_override: dict[str, object] | None = None,
+) -> str:
+    row_payload = {
+        key: row.get(key, "")
+        for key in sorted(row.keys())
+        if key not in CLIMATE_ID_COLUMNS
+    }
+    override_payload = {
+        key: value
+        for key, value in sorted((climate_override or {}).items())
+        if key != "progress_callback"
+    }
+    return json.dumps({"row": row_payload, "override": override_payload}, sort_keys=True, ensure_ascii=False)
+
+
+def clone_group_output_row(template_row: dict[str, str], row: dict[str, str]) -> dict[str, str]:
+    cloned = dict(template_row)
+    for column in CLIMATE_ID_COLUMNS:
+        cloned[column] = row[column]
+    return cloned
+
+
+def clone_group_audit_row(template_row: dict[str, str], row: dict[str, str]) -> dict[str, str]:
+    cloned = dict(template_row)
+    for column in CLIMATE_ID_COLUMNS:
+        cloned[column] = row[column]
+    return cloned
+
+
+def build_phase02_query_groups(
+    data_input_rows: list[dict[str, str]],
+    climate_override: dict[str, object] | None = None,
+) -> tuple[list[str], dict[str, dict[str, str]]]:
+    row_group_keys: list[str] = []
+    grouped_rows: dict[str, dict[str, str]] = {}
+    for row in data_input_rows:
+        group_key = serialize_phase02_group_key(row, climate_override)
+        row_group_keys.append(group_key)
+        grouped_rows.setdefault(group_key, row)
+    return row_group_keys, grouped_rows
+
+
 def build_phase02_records(
     headers: list[str],
     records: list[dict[str, object]],
@@ -2223,33 +2421,123 @@ def build_phase02_records(
 
     cache_path = output_dir / "nasa_power_cache.json"
     cache = load_nasa_cache(cache_path)
-    output_rows: list[dict[str, str]] = []
-    audit_rows: list[dict[str, str]] = []
     initial_cache_size = len(cache)
     cache_stats = {"cache_hits": 0, "cache_misses": 0}
+    output_columns = build_output_columns()
+    output_csv_path = output_dir / "output.csv"
+    audit_csv_path = output_dir / "weekly_windows_audit.csv"
+    append_csv_rows(output_csv_path, output_columns, [], write_header=True)
+    append_csv_rows(audit_csv_path, CLIMATE_AUDIT_COLUMNS, [], write_header=True)
+
+    effective_climate_override = dict(climate_override or {})
+    if locality_mode:
+        effective_climate_override["climate_scope"] = "point"
+
+    row_group_keys, grouped_rows = build_phase02_query_groups(data_input_rows, effective_climate_override)
     total_rows = len(data_input_rows)
-    for index, row in enumerate(data_input_rows, start=1):
-        effective_climate_override = dict(climate_override or {})
-        if locality_mode:
-            effective_climate_override["climate_scope"] = "point"
+    total_groups = len(grouped_rows)
+    batch_size = resolve_phase02_batch_size()
+    worker_count = resolve_phase02_worker_limit(total_groups)
+    memory_check_seconds = resolve_phase02_memory_check_seconds()
+    memory_wait_events = 0
+    memory_guard_last_details: dict[str, float | int | bool] = {}
+
+    group_results: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
+    group_items = list(grouped_rows.items())
+
+    def compute_group_result(group_key: str, representative_row: dict[str, str]) -> tuple[str, dict[str, str], dict[str, str]]:
         output_row, audit_row = build_output_row(
-            row,
+            representative_row,
             cache,
             cache_path=cache_path,
             climate_override=effective_climate_override,
             cache_stats=cache_stats,
         )
-        output_rows.append(output_row)
-        audit_rows.append(audit_row)
+        return group_key, output_row, audit_row
+
+    if worker_count <= 1 or total_groups <= 1:
+        for group_index, (group_key, representative_row) in enumerate(group_items, start=1):
+            _, output_row, audit_row = compute_group_result(group_key, representative_row)
+            group_results[group_key] = (output_row, audit_row)
+            if progress_callback:
+                progress_callback(
+                    34 + min(5, round((group_index / max(1, total_groups)) * 5)),
+                    "Enriching climate windows",
+                    f"Resolving unique NASA POWER climate groups {group_index}/{total_groups}.",
+                    {
+                        "phase": "phase02",
+                        "processed_groups": group_index,
+                        "total_groups": total_groups,
+                        "worker_count": 1,
+                    },
+                )
+    else:
+        next_group_index = 0
+        pending: dict[object, str] = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            while next_group_index < total_groups or pending:
+                launched = False
+                while next_group_index < total_groups and len(pending) < worker_count:
+                    memory_ok, memory_details = memory_allows_new_phase02_task(active_workers=len(pending))
+                    memory_guard_last_details = memory_details
+                    if not memory_ok:
+                        memory_wait_events += 1
+                        break
+                    group_key, representative_row = group_items[next_group_index]
+                    future = executor.submit(compute_group_result, group_key, representative_row)
+                    pending[future] = group_key
+                    next_group_index += 1
+                    launched = True
+                if not pending and next_group_index < total_groups and not launched:
+                    time.sleep(memory_check_seconds)
+                    continue
+                if not pending:
+                    continue
+                done, _ = wait(tuple(pending.keys()), timeout=memory_check_seconds, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+                for future in done:
+                    group_key = pending.pop(future)
+                    _, output_row, audit_row = future.result()
+                    group_results[group_key] = (output_row, audit_row)
+                    if progress_callback:
+                        progress_callback(
+                            34 + min(5, round((len(group_results) / max(1, total_groups)) * 5)),
+                            "Enriching climate windows",
+                            f"Resolving unique NASA POWER climate groups {len(group_results)}/{total_groups}.",
+                            {
+                                "phase": "phase02",
+                                "processed_groups": len(group_results),
+                                "total_groups": total_groups,
+                                "worker_count": worker_count,
+                                "memory_guard_wait_events": memory_wait_events,
+                                **memory_guard_last_details,
+                            },
+                        )
+
+    output_batch: list[dict[str, str]] = []
+    audit_batch: list[dict[str, str]] = []
+    for index, row in enumerate(data_input_rows, start=1):
+        group_key = row_group_keys[index - 1]
+        template_output_row, template_audit_row = group_results[group_key]
+        output_row = clone_group_output_row(template_output_row, row)
+        audit_row = clone_group_audit_row(template_audit_row, row)
+        output_batch.append(output_row)
+        audit_batch.append(audit_row)
+        if len(output_batch) >= batch_size or index == total_rows:
+            append_csv_rows(output_csv_path, output_columns, output_batch)
+            append_csv_rows(audit_csv_path, CLIMATE_AUDIT_COLUMNS, audit_batch)
+            output_batch.clear()
+            audit_batch.clear()
         if progress_callback:
             fresh_queries = max(len(cache) - initial_cache_size, 0)
             cached_rows = max(0, index - fresh_queries)
-            phase_percent = 34 + min(7, round((index / total_rows) * 7))
+            phase_percent = 39 + min(2, round((index / total_rows) * 2))
             progress_callback(
                 phase_percent,
                 "Enriching climate windows",
                 (
-                    f"Processing NASA POWER climate rows {index}/{total_rows}. "
+                    f"Writing climate-enriched rows {index}/{total_rows}. "
                     f"New queries this run: {fresh_queries}. Cached rows served: {cached_rows}."
                 ),
                 {
@@ -2259,17 +2547,9 @@ def build_phase02_records(
                     "fresh_queries_this_run": fresh_queries,
                     "cached_rows_served": cached_rows,
                     "nasa_unique_queries_available": len(cache),
+                    "unique_query_groups": total_groups,
                 },
             )
-
-    output_columns = build_output_columns()
-    write_csv(output_dir / "output.csv", output_columns, output_rows)
-    write_csv(output_dir / "weekly_windows_audit.csv", CLIMATE_AUDIT_COLUMNS, audit_rows)
-
-    climate_by_key = {
-        tuple(normalize_key_value(row[column]) for column in CLIMATE_ID_COLUMNS): row
-        for row in output_rows
-    }
 
     phase02_headers = (
         build_country_locality_phase02_headers(headers, target_header=target_header)
@@ -2279,35 +2559,41 @@ def build_phase02_records(
     phase02_records: list[dict[str, object]] = []
     matched_rows = 0
     unmatched_rows = 0
-    if locality_mode:
-        matched_rows = len(source_records)
-        for record, climate_row in zip(source_records, output_rows):
-            enriched = dict(record)
-            for header in output_columns:
-                if header in CLIMATE_ID_COLUMNS:
-                    continue
-                enriched[climate_header_to_label(header)] = climate_row.get(header, "")
-            phase02_records.append(enriched)
-    else:
-        for record in source_records:
-            key = (
-                normalize_key_value(record.get(TRIAL_SERIES_HEADER)),
-                normalize_key_value(record.get("Site Number")),
-                normalize_key_value(record.get("Plot")),
-                normalize_key_value(record.get("EntryCode")),
-            )
-            climate_row = climate_by_key.get(key, {})
-            if climate_row:
-                matched_rows += 1
-            else:
-                unmatched_rows += 1
 
-            enriched = dict(record)
-            for header in output_columns:
-                if header in CLIMATE_ID_COLUMNS:
-                    continue
-                enriched[climate_header_to_label(header)] = climate_row.get(header, "")
-            phase02_records.append(enriched)
+    with output_csv_path.open("r", newline="", encoding="utf-8") as handle:
+        climate_reader = csv.DictReader(handle)
+        climate_rows_iter = iter(climate_reader)
+        if locality_mode:
+            for record in source_records:
+                climate_row = next(climate_rows_iter, {})
+                if climate_row:
+                    matched_rows += 1
+                else:
+                    unmatched_rows += 1
+                enriched = dict(record)
+                for header in output_columns:
+                    if header in CLIMATE_ID_COLUMNS:
+                        continue
+                    enriched[climate_header_to_label(header)] = climate_row.get(header, "")
+                phase02_records.append(enriched)
+        else:
+            for record in source_records:
+                candidate_row = build_climate_input_row(record)
+                has_climate_row = all(
+                    candidate_row[field]
+                    for field in ("latitude", "longitude", "date_of_planting", "date_of_harvesting")
+                )
+                climate_row = next(climate_rows_iter, {}) if has_climate_row else {}
+                if has_climate_row and climate_row:
+                    matched_rows += 1
+                elif has_climate_row:
+                    unmatched_rows += 1
+                enriched = dict(record)
+                for header in output_columns:
+                    if header in CLIMATE_ID_COLUMNS:
+                        continue
+                    enriched[climate_header_to_label(header)] = climate_row.get(header, "")
+                phase02_records.append(enriched)
 
     write_workbook(
         output_dir / "phase02_climate_enriched.xlsx",
@@ -2334,6 +2620,11 @@ def build_phase02_records(
         "header_count": len(phase02_headers),
         "climate_headers_with_units": CLIMATE_HEADERS_WITH_UNITS,
         "climate_override": climate_override or {},
+        "phase02_batch_size": batch_size,
+        "phase02_worker_count": worker_count,
+        "phase02_unique_query_groups": total_groups,
+        "phase02_memory_guard_wait_events": memory_wait_events,
+        "phase02_memory_guard_last_details": memory_guard_last_details,
         **locality_metadata,
     }
     write_metadata(output_dir / "metadata.json", metadata)

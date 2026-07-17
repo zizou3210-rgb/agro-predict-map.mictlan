@@ -317,23 +317,28 @@ def memory_allows_new_compute_task(*, active_workers: int) -> tuple[bool, dict[s
             **status,
         }
 
-    if os.name == "nt" and memory_guard_enabled:
-        return False, {
-            "memory_guard_enabled": True,
-            "memory_status_available": True,
-            "memory_windows_single_worker_mode": True,
-            "memory_max_percent": max_memory_percent,
-            "memory_min_available_mb": min_available_mb,
-            **status,
-        }
+    used_percent = float(status["used_percent"])
+    available_mb = float(status["available_mb"])
+    effective_max_memory_percent = float(max_memory_percent)
+    effective_min_available_mb = float(min_available_mb)
 
-    percent_ok = max_memory_percent <= 0 or float(status["used_percent"]) < float(max_memory_percent)
-    available_ok = min_available_mb <= 0 or float(status["available_mb"]) > float(min_available_mb)
+    # On Windows we reserve extra headroom before launching a second+ compute task,
+    # but we still respect the configured thresholds instead of forcing single-worker mode.
+    if os.name == "nt" and memory_guard_enabled and active_workers >= 1:
+        if max_memory_percent > 0:
+            effective_max_memory_percent = max(1.0, float(max_memory_percent) - 15.0)
+        if min_available_mb > 0:
+            effective_min_available_mb = float(min_available_mb) + 1500.0
+
+    percent_ok = max_memory_percent <= 0 or used_percent < effective_max_memory_percent
+    available_ok = min_available_mb <= 0 or available_mb > effective_min_available_mb
     return percent_ok and available_ok, {
         "memory_guard_enabled": memory_guard_enabled,
         "memory_status_available": True,
         "memory_max_percent": max_memory_percent,
         "memory_min_available_mb": min_available_mb,
+        "memory_effective_max_percent": effective_max_memory_percent,
+        "memory_effective_min_available_mb": effective_min_available_mb,
         **status,
     }
 
