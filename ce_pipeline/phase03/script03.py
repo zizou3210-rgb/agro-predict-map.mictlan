@@ -302,24 +302,35 @@ def get_system_memory_status() -> dict[str, float] | None:
 def memory_allows_new_compute_task(*, active_workers: int) -> tuple[bool, dict[str, float | int | bool]]:
     max_memory_percent = resolve_phase03_max_memory_percent()
     min_available_mb = resolve_phase03_min_available_memory_mb()
+    memory_guard_enabled = bool(max_memory_percent or min_available_mb)
     status = get_system_memory_status()
     if status is None:
         return True, {
-            "memory_guard_enabled": bool(max_memory_percent or min_available_mb),
+            "memory_guard_enabled": memory_guard_enabled,
             "memory_status_available": False,
         }
     if active_workers <= 0:
         return True, {
-            "memory_guard_enabled": bool(max_memory_percent or min_available_mb),
+            "memory_guard_enabled": memory_guard_enabled,
             "memory_status_available": True,
             "memory_forced_single_start": True,
+            **status,
+        }
+
+    if os.name == "nt" and memory_guard_enabled:
+        return False, {
+            "memory_guard_enabled": True,
+            "memory_status_available": True,
+            "memory_windows_single_worker_mode": True,
+            "memory_max_percent": max_memory_percent,
+            "memory_min_available_mb": min_available_mb,
             **status,
         }
 
     percent_ok = max_memory_percent <= 0 or float(status["used_percent"]) < float(max_memory_percent)
     available_ok = min_available_mb <= 0 or float(status["available_mb"]) > float(min_available_mb)
     return percent_ok and available_ok, {
-        "memory_guard_enabled": bool(max_memory_percent or min_available_mb),
+        "memory_guard_enabled": memory_guard_enabled,
         "memory_status_available": True,
         "memory_max_percent": max_memory_percent,
         "memory_min_available_mb": min_available_mb,

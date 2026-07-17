@@ -139,6 +139,23 @@ class ClimatePerformanceRegressionTest(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertTrue(details["memory_forced_single_start"])
 
+    def test_memory_guard_forces_single_active_compute_worker_on_windows(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "APP_PHASE03_MAX_MEMORY_PERCENT": "70",
+                "APP_PHASE03_MIN_AVAILABLE_MEMORY_MB": "3000",
+            },
+            clear=False,
+        ), patch(
+            "ce_pipeline.phase03.script03.get_system_memory_status",
+            return_value={"used_percent": 45.0, "available_mb": 6000.0, "total_mb": 12000.0},
+        ), patch("ce_pipeline.phase03.script03.os.name", "nt"):
+            allowed, details = script03.memory_allows_new_compute_task(active_workers=1)
+
+        self.assertFalse(allowed)
+        self.assertTrue(details["memory_windows_single_worker_mode"])
+
     def test_build_climate_series_groups_deduplicates_same_pixel_and_dates(self) -> None:
         row_a = {
             "latitude": "1.2498",
