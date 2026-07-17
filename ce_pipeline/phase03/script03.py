@@ -11,6 +11,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(PACKAGE_PARENT))
 
 import argparse
+import ctypes
 import importlib.util
 import json
 import math
@@ -223,6 +224,107 @@ def resolve_phase03_worker_limit(kind: str, series_total: int) -> int:
     else:
         default_limit = 6 if kind == "prefetch" else 4
     return max(1, min(default_limit, max(series_total, 1)))
+
+
+def _get_int_env(name: str, default: int) -> int:
+    raw_value = str(os.environ.get(name, "")).strip()
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw_value = str(os.environ.get(name, "")).strip()
+    if not raw_value:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
+def resolve_phase03_max_memory_percent() -> int:
+    return max(0, min(99, _get_int_env("APP_PHASE03_MAX_MEMORY_PERCENT", 0)))
+
+
+def resolve_phase03_min_available_memory_mb() -> int:
+    return max(0, _get_int_env("APP_PHASE03_MIN_AVAILABLE_MEMORY_MB", 0))
+
+
+def resolve_phase03_memory_check_seconds() -> float:
+    return max(0.1, _get_float_env("APP_PHASE03_MEMORY_CHECK_SECONDS", 1.0))
+
+
+def get_system_memory_status() -> dict[str, float] | None:
+    if os.name == "nt":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        total_bytes = float(status.ullTotalPhys)
+        available_bytes = float(status.ullAvailPhys)
+    else:
+        try:
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            total_pages = os.sysconf("SC_PHYS_PAGES")
+            available_pages = os.sysconf("SC_AVPHYS_PAGES")
+        except (AttributeError, OSError, ValueError):
+            return None
+        total_bytes = float(page_size * total_pages)
+        available_bytes = float(page_size * available_pages)
+
+    if total_bytes <= 0:
+        return None
+    used_percent = max(0.0, min(100.0, ((total_bytes - available_bytes) / total_bytes) * 100.0))
+    return {
+        "total_mb": total_bytes / (1024.0 * 1024.0),
+        "available_mb": available_bytes / (1024.0 * 1024.0),
+        "used_percent": used_percent,
+    }
+
+
+def memory_allows_new_compute_task(*, active_workers: int) -> tuple[bool, dict[str, float | int | bool]]:
+    max_memory_percent = resolve_phase03_max_memory_percent()
+    min_available_mb = resolve_phase03_min_available_memory_mb()
+    status = get_system_memory_status()
+    if status is None:
+        return True, {
+            "memory_guard_enabled": bool(max_memory_percent or min_available_mb),
+            "memory_status_available": False,
+        }
+    if active_workers <= 0:
+        return True, {
+            "memory_guard_enabled": bool(max_memory_percent or min_available_mb),
+            "memory_status_available": True,
+            "memory_forced_single_start": True,
+            **status,
+        }
+
+    percent_ok = max_memory_percent <= 0 or float(status["used_percent"]) < float(max_memory_percent)
+    available_ok = min_available_mb <= 0 or float(status["available_mb"]) > float(min_available_mb)
+    return percent_ok and available_ok, {
+        "memory_guard_enabled": bool(max_memory_percent or min_available_mb),
+        "memory_status_available": True,
+        "memory_max_percent": max_memory_percent,
+        "memory_min_available_mb": min_available_mb,
+        **status,
+    }
 
 
 def resolve_chc_pixel_metadata(latitude: float, longitude: float) -> tuple[str, float, float]:
@@ -1368,19 +1470,67 @@ def build_phase02_records_parallel_workspace(
     )
     report_parallel_series_progress("__bootstrap__", 0, 1, completed=False, force=True)
 
+    memory_check_seconds = resolve_phase03_memory_check_seconds()
+    memory_wait_events = 0
+    memory_guard_last_details: dict[str, float | int | bool] = {}
+    max_parallel_futures = 0
+    last_memory_wait_report_at = 0.0
+
     global _CHC_PARALLEL_PROGRESS_MODE
     original_parallel_progress_mode = _CHC_PARALLEL_PROGRESS_MODE
     _CHC_PARALLEL_PROGRESS_MODE = worker_count > 1
     try:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            pending_futures = {
-                executor.submit(process_series, item): item[0]
-                for item in unique_series_items
-            }
-            while pending_futures:
-                done_futures, pending_set = wait(
+            unique_series_queue = iter(unique_series_items)
+            pending_futures: dict[object, tuple[str, str, str]] = {}
+            queue_exhausted = False
+            while pending_futures or not queue_exhausted:
+                launched_any = False
+                while len(pending_futures) < worker_count and not queue_exhausted:
+                    memory_ok, memory_details = memory_allows_new_compute_task(active_workers=len(pending_futures))
+                    memory_guard_last_details = memory_details
+                    if not memory_ok:
+                        if pending_futures:
+                            memory_wait_events += 1
+                            now = time.time()
+                            if progress_file is not None and now - last_memory_wait_report_at >= max(2.0, memory_check_seconds):
+                                write_progress(
+                                    progress_file,
+                                    percent=33,
+                                    stage="Computing climate windows",
+                                    message=(
+                                        "Waiting for available memory before launching more climate window workers. "
+                                        f"RAM used {float(memory_details.get('used_percent', 0.0)):.1f}% with "
+                                        f"{float(memory_details.get('available_mb', 0.0)):.0f} MB available."
+                                    ),
+                                    details={
+                                        "phase": "phase03",
+                                        "memory_guard_waiting": True,
+                                        "memory_wait_events": memory_wait_events,
+                                        **memory_details,
+                                    },
+                                )
+                                last_memory_wait_report_at = now
+                            break
+                    try:
+                        item = next(unique_series_queue)
+                    except StopIteration:
+                        queue_exhausted = True
+                        break
+                    future = executor.submit(process_series, item)
+                    pending_futures[future] = item[0]
+                    launched_any = True
+                    max_parallel_futures = max(max_parallel_futures, len(pending_futures))
+
+                if not pending_futures:
+                    if queue_exhausted:
+                        break
+                    time.sleep(memory_check_seconds)
+                    continue
+
+                done_futures, _pending_set = wait(
                     pending_futures.keys(),
-                    timeout=5,
+                    timeout=memory_check_seconds,
                     return_when=FIRST_COMPLETED,
                 )
                 if not done_futures:
@@ -1511,6 +1661,14 @@ def build_phase02_records_parallel_workspace(
         "parallel_unique_climate_series": total_unique_series,
         "parallel_progress_series_total": progress_series_total,
         "parallel_workers": worker_count,
+        "parallel_max_active_workers": max_parallel_futures,
+        "memory_guard_wait_events": memory_wait_events,
+        "memory_guard_last_details": memory_guard_last_details,
+        "memory_guard_config": {
+            "max_memory_percent": resolve_phase03_max_memory_percent(),
+            "min_available_memory_mb": resolve_phase03_min_available_memory_mb(),
+            "check_seconds": memory_check_seconds,
+        },
         "climate_series_group_count": len(grouped_rows),
         "climate_feature_cache_version": CLIMATE_FEATURE_CACHE_VERSION,
         "unique_date_pair_count": len({(str(row.get("date_of_planting") or "").strip(), str(row.get("date_of_harvesting") or "").strip()) for row in data_input_rows if str(row.get("date_of_planting") or "").strip() and str(row.get("date_of_harvesting") or "").strip()}),

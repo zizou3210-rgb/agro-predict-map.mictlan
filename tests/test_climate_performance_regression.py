@@ -103,6 +103,42 @@ class ClimatePerformanceRegressionTest(unittest.TestCase):
             script03._CHC_PIXEL_DAILY_SAMPLE_CACHE = original_cache
             script03._CHC_PREPARED_RASTER_PATHS = {}
 
+    def test_memory_guard_blocks_new_compute_workers_when_limits_are_exceeded(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "APP_PHASE03_MAX_MEMORY_PERCENT": "75",
+                "APP_PHASE03_MIN_AVAILABLE_MEMORY_MB": "2500",
+            },
+            clear=False,
+        ), patch(
+            "ce_pipeline.phase03.script03.get_system_memory_status",
+            return_value={"used_percent": 81.0, "available_mb": 1800.0, "total_mb": 12000.0},
+        ):
+            allowed, details = script03.memory_allows_new_compute_task(active_workers=1)
+
+        self.assertFalse(allowed)
+        self.assertTrue(details["memory_guard_enabled"])
+        self.assertEqual(details["memory_max_percent"], 75)
+        self.assertEqual(details["memory_min_available_mb"], 2500)
+
+    def test_memory_guard_allows_bootstrap_worker_even_when_memory_is_high(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "APP_PHASE03_MAX_MEMORY_PERCENT": "70",
+                "APP_PHASE03_MIN_AVAILABLE_MEMORY_MB": "3000",
+            },
+            clear=False,
+        ), patch(
+            "ce_pipeline.phase03.script03.get_system_memory_status",
+            return_value={"used_percent": 90.0, "available_mb": 1200.0, "total_mb": 12000.0},
+        ):
+            allowed, details = script03.memory_allows_new_compute_task(active_workers=0)
+
+        self.assertTrue(allowed)
+        self.assertTrue(details["memory_forced_single_start"])
+
     def test_build_climate_series_groups_deduplicates_same_pixel_and_dates(self) -> None:
         row_a = {
             "latitude": "1.2498",
@@ -123,9 +159,10 @@ class ClimatePerformanceRegressionTest(unittest.TestCase):
             "date_of_harvesting": "2026-03-15",
         }
 
-        groups = script03.build_climate_series_groups([row_a, row_b, row_c])
+        groups, row_series_keys = script03.build_climate_series_groups([row_a, row_b, row_c])
 
         self.assertEqual(len(groups), 2)
+        self.assertEqual(len(row_series_keys), 3)
         self.assertEqual(sorted(len(items) for items in groups.values()), [1, 2])
 
     def test_versioned_climate_feature_cache_round_trip(self) -> None:
