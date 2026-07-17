@@ -18,13 +18,14 @@ import os
 import shutil
 import ssl
 import sys
+import tempfile
 import time
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Lock, RLock, local
 from collections import Counter
 from typing import Callable
 from urllib.request import Request, urlopen
@@ -178,13 +179,16 @@ CHIRPS_MIN_LATITUDE = -60.0
 CHIRPS_MAX_LATITUDE = 60.0
 CHIRTS_MIN_LATITUDE = -60.0
 CHIRTS_MAX_LATITUDE = 70.0
-MAX_OPEN_RASTERS = 12
+DEFAULT_MAX_OPEN_RASTERS = 12
 CLIMATE_FEATURE_CACHE_VERSION = 2
 CHC_GRID_STEP_DEGREES = 0.05
 CLIMATE_PIXEL_ID_HEADER = "Climate Pixel ID"
-_RASTER_IMAGE_CACHE: OrderedDict[Path, Image.Image] = OrderedDict()
+_THREAD_LOCAL_RASTER_STATE = local()
 _RASTER_METADATA_CACHE: dict[Path, tuple[float, float, float, float, int, int]] = {}
 _RASTER_CACHE_LOCK = RLock()
+_RASTER_DOWNLOAD_LOCKS: dict[Path, object] = {}
+_RASTER_DOWNLOAD_LOCKS_LOCK = Lock()
+_CHC_CACHE_LOCK = RLock()
 _CHC_DOWNLOAD_PROGRESS_HOOK: Callable[[str, int, int, bool], None] | None = None
 _CHC_DOWNLOAD_PROGRESS_STATE: dict[str, int] = {"series_total": 0, "series_completed": 0, "series_total_days": 0, "download_max_processed_days": 0, "compute_max_processed_days": 0}
 _CHC_SERIES_AGGREGATION_CACHE: dict[int, dict[str, object]] = {}
@@ -223,6 +227,16 @@ def resolve_phase03_worker_limit(kind: str, series_total: int) -> int:
     else:
         default_limit = 6 if kind == "prefetch" else 4
     return max(1, min(default_limit, max(series_total, 1)))
+
+
+def resolve_phase03_max_open_rasters() -> int:
+    raw_value = str(os.environ.get("APP_PHASE03_MAX_OPEN_RASTERS", "")).strip()
+    if not raw_value:
+        return DEFAULT_MAX_OPEN_RASTERS
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return DEFAULT_MAX_OPEN_RASTERS
 
 
 def resolve_chc_pixel_metadata(latitude: float, longitude: float) -> tuple[str, float, float]:
@@ -392,6 +406,16 @@ def _build_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+def _get_raster_download_lock(target_path: Path):
+    normalized_path = target_path.expanduser().resolve()
+    with _RASTER_DOWNLOAD_LOCKS_LOCK:
+        lock = _RASTER_DOWNLOAD_LOCKS.get(normalized_path)
+        if lock is None:
+            lock = Lock()
+            _RASTER_DOWNLOAD_LOCKS[normalized_path] = lock
+        return lock
+
+
 def _download_with_retries(url: str, target_path: Path) -> None:
     last_error: Exception | None = None
     request = Request(url, headers={"User-Agent": "cimmyt_app ce_pipeline climate"})
@@ -401,9 +425,22 @@ def _download_with_retries(url: str, target_path: Path) -> None:
             with urlopen(request, timeout=ea_pipeline.HTTP_TIMEOUT_SECONDS, context=ssl_context) as response:
                 payload = response.read()
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = target_path.with_suffix(target_path.suffix + '.tmp')
-            temp_path.write_bytes(payload)
-            temp_path.replace(target_path)
+            temp_name = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    delete=False,
+                    dir=str(target_path.parent),
+                    prefix=f"{target_path.name}.",
+                    suffix=".tmp",
+                ) as handle:
+                    handle.write(payload)
+                    temp_name = handle.name
+                Path(temp_name).replace(target_path)
+            except Exception:
+                if temp_name:
+                    Path(temp_name).unlink(missing_ok=True)
+                raise
             return
         except Exception as exc:  # pragma: no cover - network dependent
             last_error = exc
@@ -420,10 +457,11 @@ def _download_with_retries(url: str, target_path: Path) -> None:
 
 def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> tuple[Path, bool]:
     target_path, url = _resolve_raster_request(dataset, current_date, cache_dir)
-    downloaded = False
-    if not target_path.exists():
-        _download_with_retries(url, target_path)
-        downloaded = True
+    with _get_raster_download_lock(target_path):
+        downloaded = False
+        if not target_path.exists():
+            _download_with_retries(url, target_path)
+            downloaded = True
     return target_path, downloaded
 
 
@@ -435,21 +473,40 @@ def _resolve_prepared_raster_path(dataset: str, current_date: date, cache_dir: P
     return target_path
 
 
+def _get_thread_raster_image_cache() -> OrderedDict[Path, Image.Image]:
+    cache = getattr(_THREAD_LOCAL_RASTER_STATE, "image_cache", None)
+    if cache is None:
+        cache = OrderedDict()
+        _THREAD_LOCAL_RASTER_STATE.image_cache = cache
+    return cache
+
+
+def _trim_raster_image_cache(cache: OrderedDict[Path, Image.Image]) -> None:
+    while len(cache) > resolve_phase03_max_open_rasters():
+        _, old_image = cache.popitem(last=False)
+        old_image.close()
+
+
+def _clear_thread_raster_image_cache() -> None:
+    cache = getattr(_THREAD_LOCAL_RASTER_STATE, "image_cache", None)
+    if cache is None:
+        return
+    while cache:
+        _, image = cache.popitem(last=False)
+        image.close()
+
+
 def _get_raster_image(path: Path) -> Image.Image:
     with _RASTER_CACHE_LOCK:
-        cached = _RASTER_IMAGE_CACHE.get(path)
+        cache = _get_thread_raster_image_cache()
+        cached = cache.get(path)
         if cached is not None:
-            _RASTER_IMAGE_CACHE.move_to_end(path)
+            cache.move_to_end(path)
             return cached
         image = Image.open(path)
-        _RASTER_IMAGE_CACHE[path] = image
-        _RASTER_IMAGE_CACHE.move_to_end(path)
-        # During parallel climate processing, avoid evicting shared PIL handles
-        # that may still be in use by another worker.
-        if not _CHC_PARALLEL_PROGRESS_MODE:
-            while len(_RASTER_IMAGE_CACHE) > MAX_OPEN_RASTERS:
-                _, old_image = _RASTER_IMAGE_CACHE.popitem(last=False)
-                old_image.close()
+        cache[path] = image
+        cache.move_to_end(path)
+        _trim_raster_image_cache(cache)
         return image
 
 
@@ -780,7 +837,9 @@ def fetch_chc_series(
     )
     series_identifier = "|".join(cache_key)
     total_days = max((end_date - start_date).days + 1, 1)
-    if cache_key in cache:
+    with _CHC_CACHE_LOCK:
+        cached_series = cache.get(cache_key)
+    if cached_series is not None:
         if _CHC_PARALLEL_PROGRESS_MODE:
             report_parallel_series_progress(series_identifier, total_days, total_days, completed=True, force=True)
         if _CHC_DOWNLOAD_PROGRESS_HOOK is not None and not _CHC_PARALLEL_PROGRESS_MODE:
@@ -788,7 +847,7 @@ def fetch_chc_series(
             _CHC_DOWNLOAD_PROGRESS_HOOK("compute", total_days, total_days, True)
         if stats is not None:
             stats['cache_hits'] = stats.get('cache_hits', 0) + 1
-        return cache[cache_key]
+        return cached_series
 
     cache_dir = resolve_shared_chc_cache_dir()
     result = {'T2M': {}, 'PRECTOTCORR': {}}
@@ -869,11 +928,17 @@ def fetch_chc_series(
     elif _CHC_DOWNLOAD_PROGRESS_HOOK is not None:
         _CHC_DOWNLOAD_PROGRESS_HOOK("compute", total_days, total_days, True)
 
-    cache[cache_key] = result
-    if stats is not None:
-        stats['cache_misses'] = stats.get('cache_misses', 0) + 1
-    if cache_path is not None:
-        ea_pipeline.save_nasa_cache(cache_path, cache)
+    with _CHC_CACHE_LOCK:
+        cached_series = cache.get(cache_key)
+        if cached_series is not None:
+            if stats is not None:
+                stats['cache_hits'] = stats.get('cache_hits', 0) + 1
+            return cached_series
+        cache[cache_key] = result
+        if stats is not None:
+            stats['cache_misses'] = stats.get('cache_misses', 0) + 1
+        if cache_path is not None:
+            ea_pipeline.save_nasa_cache(cache_path, cache)
     return result
 
 
@@ -1373,12 +1438,23 @@ def build_phase02_records_parallel_workspace(
     _CHC_PARALLEL_PROGRESS_MODE = worker_count > 1
     try:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            pending_futures = {
-                executor.submit(process_series, item): item[0]
-                for item in unique_series_items
-            }
-            while pending_futures:
-                done_futures, pending_set = wait(
+            unique_series_queue = iter(unique_series_items)
+            pending_futures: dict[object, tuple[str, str, str]] = {}
+            queue_exhausted = False
+            while pending_futures or not queue_exhausted:
+                while len(pending_futures) < worker_count and not queue_exhausted:
+                    try:
+                        item = next(unique_series_queue)
+                    except StopIteration:
+                        queue_exhausted = True
+                        break
+                    future = executor.submit(process_series, item)
+                    pending_futures[future] = item[0]
+
+                if not pending_futures:
+                    continue
+
+                done_futures, _pending_set = wait(
                     pending_futures.keys(),
                     timeout=5,
                     return_when=FIRST_COMPLETED,
