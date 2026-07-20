@@ -1253,6 +1253,14 @@ def report_parallel_series_progress(
             sum(1 for item in visible_series_progress.values() if bool(item.get("completed"))),
             effective_series_total,
         )
+        started_series = min(
+            sum(
+                1
+                for item in visible_series_progress.values()
+                if int(item.get("processed_days", 0) or 0) > 0 or bool(item.get("completed"))
+            ),
+            effective_series_total,
+        )
         overall_fraction = 0.0
         for item in visible_series_progress.values():
             item_total_days = max(int(item.get("total_days", 1) or 1), 1)
@@ -1274,6 +1282,7 @@ def report_parallel_series_progress(
     else:
         message = (
             f"Computing climate windows in parallel: {completed_series}/{effective_series_total} climate series completed. "
+            f"{started_series}/{effective_series_total} started or in progress. "
             f"{active_workers} worker{'s' if active_workers != 1 else ''} active. "
             f"Phase03 climate workload progress {overall_fraction * 100:.1f}%."
         )
@@ -1287,6 +1296,7 @@ def report_parallel_series_progress(
             "phase": "phase03",
             "climate_progress_stage": "compute",
             "climate_series_completed": completed_series,
+            "climate_series_started": started_series,
             "climate_series_total": effective_series_total,
             "climate_parallel_workers": worker_count,
             "soil_skipped": skip_soil_enrichment,
@@ -1301,6 +1311,7 @@ def report_parallel_series_progress(
                 "phase": "phase03",
                 "climate_progress_stage": "compute",
                 "climate_series_completed": completed_series,
+                "climate_series_started": started_series,
                 "climate_series_total": effective_series_total,
                 "climate_parallel_workers": worker_count,
                 "soil_skipped": skip_soil_enrichment,
@@ -1914,18 +1925,10 @@ def create_phase03_workbook(
     _CHC_PREPARED_RASTER_PATHS = dict(prefetch_metadata.get("prepared_raster_paths", {}))
     _CHC_DOWNLOAD_PROGRESS_STATE = {"series_total": estimated_series_total, "series_completed": 0, "series_total_days": 0, "download_max_processed_days": 0, "compute_max_processed_days": 0}
 
-    use_ephemeral_chc_series_cache = bool(climate_override) and str(
-        (climate_override or {}).get("climate_scope", "")
-    ).strip() == "regional_manual"
-
     def load_shared_nasa_cache(_cache_path: Path):
-        if use_ephemeral_chc_series_cache:
-            return {}
         return original_load_nasa_cache(shared_nasa_cache_path)
 
     def save_shared_nasa_cache(_cache_path: Path, cache):
-        if use_ephemeral_chc_series_cache:
-            return
         buffered_cache_writer.save(shared_nasa_cache_path, cache)
 
     ea_pipeline.load_nasa_cache = load_shared_nasa_cache
@@ -1985,7 +1988,7 @@ def create_phase03_workbook(
             },
         )
 
-    if shared_nasa_cache_path.exists() and not use_ephemeral_chc_series_cache:
+    if shared_nasa_cache_path.exists():
         shutil.copy2(shared_nasa_cache_path, local_nasa_cache_path)
 
     if manual_grid_pixel_map:
