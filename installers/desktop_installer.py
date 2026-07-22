@@ -258,6 +258,44 @@ def resolve_bundled_python_command(app_dir: Path | None = None, platform_name: s
     return None
 
 
+def cleaned_python_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+def sanitize_windows_bundled_runtime(app_dir: Path) -> None:
+    runtime_dir = app_dir / "python-runtime"
+    pyvenv_cfg = runtime_dir / "pyvenv.cfg"
+    if pyvenv_cfg.exists():
+        console_log(f"[installer] Removing inherited pyvenv.cfg from bundled Windows runtime: {pyvenv_cfg}")
+        pyvenv_cfg.unlink()
+
+
+def validate_python_runtime(python_exec: str, *, cwd: Path | None = None) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            [python_exec, "-c", "import encodings, sys; print(sys.prefix)"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=str(cwd) if cwd is not None else None,
+            env=cleaned_python_env(),
+        )
+        return True, result.stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        output_parts: list[str] = []
+        stdout = getattr(exc, "stdout", "")
+        stderr = getattr(exc, "stderr", "")
+        if stdout:
+            output_parts.append(str(stdout).strip())
+        if stderr:
+            output_parts.append(str(stderr).strip())
+        details = "\n".join(part for part in output_parts if part)
+        return False, details or str(exc)
+
+
 def stop_running_windows_processes(install_root: Path) -> None:
     if platform.system() != "Windows":
         return
@@ -416,15 +454,28 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
             )
         selected_python = python_exec or resolve_bootstrap_python()
         console_log(f"[installer] Creating virtual environment with {selected_python}")
-        subprocess.run([selected_python, "-m", "venv", str(venv_dir)], check=True)
+        subprocess.run(
+            [selected_python, "-m", "venv", str(venv_dir)],
+            check=True,
+            env=cleaned_python_env(),
+        )
         venv_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
         if venv_python is None:
             raise FileNotFoundError(f"FeatureHero virtualenv Python was not created in: {venv_dir}")
 
     console_log("[installer] Upgrading pip inside FeatureHero runtime")
-    subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], check=True)
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
+        check=True,
+        env=cleaned_python_env(),
+    )
     console_log("[installer] Installing FeatureHero package into the runtime")
-    subprocess.run([str(venv_python), "-m", "pip", "install", "."], cwd=str(featurehero_dir), check=True)
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "."],
+        cwd=str(featurehero_dir),
+        check=True,
+        env=cleaned_python_env(),
+    )
     return f"FeatureHero runtime prepared at {venv_dir}."
 
 
@@ -756,9 +807,20 @@ def install_windows() -> str:
     install_root, copied_entries = stage_application_snapshot()
     runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "windows")
     console_log(f"[installer] {runtime_copy_message}")
+    sanitize_windows_bundled_runtime(resolve_installed_app_dir())
     bundled_python = resolve_bundled_python_command(resolve_installed_app_dir(), "windows")
     if not bundled_python:
         raise FileNotFoundError("Bundled Python 3.12 was not found for Windows installation.")
+    runtime_ok, runtime_details = validate_python_runtime(
+        bundled_python,
+        cwd=resolve_installed_app_dir() / "python-runtime",
+    )
+    if not runtime_ok:
+        raise RuntimeError(
+            "The bundled Windows Python runtime is not relocatable after installation. "
+            f"Validation failed for {bundled_python}.\n{runtime_details}"
+        )
+    console_log(f"[installer] Bundled Windows runtime validated with sys.prefix={runtime_details}")
     console_log(f"[installer] Using bundled Python: {bundled_python}")
     runtime_bootstrap_message = bootstrap_featurehero_runtime(
         resolve_installed_app_dir(),
