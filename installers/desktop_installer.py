@@ -211,7 +211,12 @@ def should_preserve_windows_path(relative_path: Path) -> bool:
     if not normalized_parts:
         return False
     normalized = Path(*normalized_parts)
-    return any(normalized == preserved or preserved in normalized.parents for preserved in WINDOWS_PRESERVED_PATHS)
+    return any(
+        normalized == preserved
+        or preserved in normalized.parents
+        or normalized in preserved.parents
+        for preserved in WINDOWS_PRESERVED_PATHS
+    )
 
 
 def resolve_featurehero_runtime_dir(app_dir: Path | None = None) -> Path:
