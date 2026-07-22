@@ -34,6 +34,10 @@ ICON_RELATIVE_PATH = Path("icons") / "icon-app.svg"
 WINDOWS_SHORTCUT_ICON_SOURCE = Path("icons") / "icon_mictlan.png"
 WINDOWS_SHORTCUT_ICON_NAME = "icon_mictlan.ico"
 INSTALLER_STATE_NAME = "install_state.json"
+WINDOWS_PRESERVED_PATHS = {
+    Path("python-runtime"),
+    Path("resources") / "featurehero" / ".venv",
+}
 REQUIRED_APP_ENTRIES = [
     "__init__.py",
     "config_env.py",
@@ -200,6 +204,14 @@ def remove_existing_path(target: Path) -> None:
         remove_path_with_retries(target)
         return
     target.unlink()
+
+
+def should_preserve_windows_path(relative_path: Path) -> bool:
+    normalized_parts = tuple(part for part in relative_path.parts if part not in {"", "."})
+    if not normalized_parts:
+        return False
+    normalized = Path(*normalized_parts)
+    return any(normalized == preserved or preserved in normalized.parents for preserved in WINDOWS_PRESERVED_PATHS)
 
 
 def resolve_featurehero_runtime_dir(app_dir: Path | None = None) -> Path:
@@ -715,13 +727,16 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
                 raise FileNotFoundError(f"Missing required app entry for installer snapshot: {source}")
             continue
         destination_root = app_install_dir / entry_name
-        if destination_root.exists():
+        if destination_root.exists() and not (is_windows and should_preserve_windows_path(Path(entry_name))):
             remove_existing_path(destination_root)
         if source.is_dir():
             for child in source.iterdir():
                 relative_child = Path(entry_name) / child.name
                 if should_skip_entry(relative_child):
                     continue
+                destination_child = app_install_dir / relative_child
+                if destination_child.exists() and not (is_windows and should_preserve_windows_path(relative_child)):
+                    remove_existing_path(destination_child)
                 copy_entry(child, app_install_dir / relative_child, relative_child)
         else:
             if should_skip_entry(Path(entry_name)):
