@@ -2950,12 +2950,20 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             return
 
+        completed_progress = dict(progress_payload) if isinstance(progress_payload, dict) else {}
+        completed_progress["status"] = "completed"
+        completed_progress["percent"] = 100
+        if not str(completed_progress.get("stage") or "").strip():
+            completed_progress["stage"] = "Prediction complete"
+        if not str(completed_progress.get("message") or "").strip():
+            completed_progress["message"] = "The pipeline finished successfully."
+
         payload = self.build_completed_payload(job_id, run_dir, source_name)
         self.send_json(
             {
                 "job_id": job_id,
                 "status": "completed",
-                "progress": progress_payload,
+                "progress": completed_progress,
                 **payload,
             }
         )

@@ -663,7 +663,8 @@ const syncPersistedPipelineStateWithRuntime = async () => {
     if (!response.ok) {
       return;
     }
-    if (!payload?.has_active_runtime_jobs) {
+    const activePipelineJobs = Number(payload?.active_pipeline_jobs ?? 0);
+    if (activePipelineJobs <= 0 || !payload?.has_active_runtime_jobs) {
       clearActivePipelineJob();
     }
   } catch (error) {

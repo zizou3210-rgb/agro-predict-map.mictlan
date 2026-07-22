@@ -8,6 +8,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from config_env import resolve_shared_cache_dir
+from shared_cache import (
+    get_soil_cache_entry,
+    load_soil_cache_payload as load_shared_soil_cache_payload,
+    write_soil_cache_payload as write_shared_soil_cache_payload,
+)
+
 
 SOIL_TEXTURE_HEADER = "Soil type/texture"
 SOIL_DEPTH_HEADER = "Soil Depth (cm)-How deep do you expect maize roots to grow in this soil?"
@@ -142,20 +149,13 @@ def cache_key(latitude: float, longitude: float) -> str:
 
 
 def load_cache_payload(cache_path: Path) -> dict[str, Any]:
-    if not cache_path.exists():
-        return {}
-    try:
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    use_sqlite = cache_path.resolve() == (resolve_shared_cache_dir() / "soilgrids_cache.json").resolve()
+    return load_shared_soil_cache_payload(cache_path, use_sqlite=use_sqlite)
 
 
 def write_cache_payload(cache_path: Path, payload: dict[str, Any]) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
-    temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary_path.replace(cache_path)
+    use_sqlite = cache_path.resolve() == (resolve_shared_cache_dir() / "soilgrids_cache.json").resolve()
+    write_shared_soil_cache_payload(cache_path, payload, use_sqlite=use_sqlite)
 
 
 def _select_nested_depth_value(mapping: dict[str, Any]) -> float | None:
@@ -277,6 +277,10 @@ def resolve_soil_record_from_payload(
     points = normalized_payload.setdefault("points", {})
     key = cache_key(latitude, longitude)
     cached = points.get(key)
+    if not isinstance(cached, dict):
+        cached = get_soil_cache_entry(key)
+        if isinstance(cached, dict):
+            points[key] = cached
     if isinstance(cached, dict):
         return cached, "cache_hit", False
 

@@ -19,6 +19,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from config_env import resolve_shared_cache_dir
+from shared_cache import (
+    get_nasa_cache_entry,
+    load_nasa_cache as load_shared_nasa_cache,
+    save_nasa_cache as save_shared_nasa_cache,
+    upsert_nasa_cache_entries,
+)
+
 from openpyxl import Workbook, load_workbook
 
 from preprocess.phase1_schema import OUTPUT_HEADERS as PHASE1_COMPAT_HEADERS
@@ -1441,26 +1449,42 @@ def normalize_nasa_value(value: Any) -> float | None:
 def load_nasa_cache(
     path: Path,
 ) -> dict[tuple[str, str, str, str], dict[str, dict[str, float | None]]]:
-    raw_payload = load_json_file(path, default={})
-    cache: dict[tuple[str, str, str, str], dict[str, dict[str, float | None]]] = {}
-    if not isinstance(raw_payload, dict):
-        return cache
-    for raw_key, value in raw_payload.items():
-        if not isinstance(raw_key, str):
-            continue
-        parts = raw_key.split("|")
-        if len(parts) != 4:
-            continue
-        cache[(parts[0], parts[1], parts[2], parts[3])] = value
-    return cache
+    use_sqlite = path.resolve() == (resolve_shared_cache_dir() / "nasa_power_cache.json").resolve()
+    return load_shared_nasa_cache(path, use_sqlite=use_sqlite)
 
 
 def save_nasa_cache(
     path: Path,
     cache: dict[tuple[str, str, str, str], dict[str, dict[str, float | None]]],
 ) -> None:
-    serialized = {"|".join(key): value for key, value in sorted(cache.items())}
-    save_json_file(path, serialized)
+    use_sqlite = path.resolve() == (resolve_shared_cache_dir() / "nasa_power_cache.json").resolve()
+    save_shared_nasa_cache(path, cache, use_sqlite=use_sqlite)
+
+
+def resolve_shared_nasa_cache_path() -> Path:
+    return resolve_shared_cache_dir() / "nasa_power_cache.json"
+
+
+def is_shared_nasa_cache_path(path: Path | None) -> bool:
+    if path is None:
+        return False
+    try:
+        return path.resolve() == resolve_shared_nasa_cache_path().resolve()
+    except OSError:
+        return False
+
+
+def persist_nasa_cache_entry(
+    cache_key: tuple[str, str, str, str],
+    payload: dict[str, dict[str, float | None]],
+    *,
+    cache_path: Path | None = None,
+) -> None:
+    if is_shared_nasa_cache_path(cache_path):
+        upsert_nasa_cache_entries({cache_key: payload})
+        return
+    if cache_path is not None:
+        save_nasa_cache(cache_path, {cache_key: payload})
 
 
 def parse_retry_after_seconds(error: HTTPError) -> float | None:
@@ -1490,6 +1514,12 @@ def fetch_nasa_series(
         if stats is not None:
             stats["cache_hits"] = stats.get("cache_hits", 0) + 1
         return cache[cache_key]
+    shared_cached = get_nasa_cache_entry(cache_key)
+    if shared_cached is not None:
+        cache[cache_key] = shared_cached
+        if stats is not None:
+            stats["cache_hits"] = stats.get("cache_hits", 0) + 1
+        return shared_cached
 
     url = build_api_url(latitude, longitude, start_date, end_date)
     request = Request(url, headers={"User-Agent": "app preprocess pipeline"})
@@ -1509,8 +1539,7 @@ def fetch_nasa_series(
             cache[cache_key] = result
             if stats is not None:
                 stats["cache_misses"] = stats.get("cache_misses", 0) + 1
-            if cache_path is not None:
-                save_nasa_cache(cache_path, cache)
+            persist_nasa_cache_entry(cache_key, result, cache_path=cache_path)
             return result
         except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
             last_error = exc
@@ -1585,44 +1614,50 @@ def fetch_nasa_regional_series(
                     stats["cache_hits"] = stats.get("cache_hits", 0) + 1
                 regional_series = cache[cache_key]
             else:
-                url = build_regional_api_url(
-                    latitude_min,
-                    latitude_max,
-                    longitude_min,
-                    longitude_max,
-                    parameter,
-                    start_date,
-                    end_date,
-                )
-                request = Request(url, headers={"User-Agent": "app preprocess pipeline"})
-                last_error: Exception | None = None
-                for attempt in range(1, MAX_RETRIES + 1):
-                    try:
-                        with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-                            payload = json.load(response)
-                        spatial_average = aggregate_regional_payload(payload, parameter)
-                        regional_series = {parameter: spatial_average}
-                        cache[cache_key] = regional_series
-                        if stats is not None:
-                            stats["cache_misses"] = stats.get("cache_misses", 0) + 1
-                        if cache_path is not None:
-                            save_nasa_cache(cache_path, cache)
-                        break
-                    except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
-                        last_error = exc
-                        if attempt == MAX_RETRIES:
-                            raise RuntimeError(
-                                "No se pudo consultar NASA POWER regional para "
-                                f"region={region_label}, parameter={parameter}, "
-                                f"lat=({latitude_min},{latitude_max}), lon=({longitude_min},{longitude_max}), "
-                                f"start={start_date}, end={end_date}"
-                            ) from last_error
-                        sleep_seconds = min(RETRY_SLEEP_SECONDS * (2 ** (attempt - 1)), MAX_RETRY_SLEEP_SECONDS)
-                        if isinstance(exc, HTTPError) and exc.code == 429:
-                            retry_after = parse_retry_after_seconds(exc)
-                            if retry_after is not None:
-                                sleep_seconds = max(sleep_seconds, retry_after)
-                        time.sleep(sleep_seconds)
+                shared_cached = get_nasa_cache_entry(cache_key)
+                if shared_cached is not None:
+                    cache[cache_key] = shared_cached
+                    if stats is not None:
+                        stats["cache_hits"] = stats.get("cache_hits", 0) + 1
+                    regional_series = shared_cached
+                else:
+                    url = build_regional_api_url(
+                        latitude_min,
+                        latitude_max,
+                        longitude_min,
+                        longitude_max,
+                        parameter,
+                        start_date,
+                        end_date,
+                    )
+                    request = Request(url, headers={"User-Agent": "app preprocess pipeline"})
+                    last_error: Exception | None = None
+                    for attempt in range(1, MAX_RETRIES + 1):
+                        try:
+                            with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+                                payload = json.load(response)
+                            spatial_average = aggregate_regional_payload(payload, parameter)
+                            regional_series = {parameter: spatial_average}
+                            cache[cache_key] = regional_series
+                            if stats is not None:
+                                stats["cache_misses"] = stats.get("cache_misses", 0) + 1
+                            persist_nasa_cache_entry(cache_key, regional_series, cache_path=cache_path)
+                            break
+                        except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
+                            last_error = exc
+                            if attempt == MAX_RETRIES:
+                                raise RuntimeError(
+                                    "No se pudo consultar NASA POWER regional para "
+                                    f"region={region_label}, parameter={parameter}, "
+                                    f"lat=({latitude_min},{latitude_max}), lon=({longitude_min},{longitude_max}), "
+                                    f"start={start_date}, end={end_date}"
+                                ) from last_error
+                            sleep_seconds = min(RETRY_SLEEP_SECONDS * (2 ** (attempt - 1)), MAX_RETRY_SLEEP_SECONDS)
+                            if isinstance(exc, HTTPError) and exc.code == 429:
+                                retry_after = parse_retry_after_seconds(exc)
+                                if retry_after is not None:
+                                    sleep_seconds = max(sleep_seconds, retry_after)
+                            time.sleep(sleep_seconds)
             for day_key, value in regional_series.get(parameter, {}).items():
                 combined[parameter].setdefault(day_key, []).append(value)
     aggregated = {
@@ -2221,8 +2256,8 @@ def build_phase02_records(
 
     write_csv(output_dir / "dataInput.csv", CLIMATE_INPUT_COLUMNS, data_input_rows)
 
-    cache_path = output_dir / "nasa_power_cache.json"
-    cache = load_nasa_cache(cache_path)
+    cache_path = resolve_shared_nasa_cache_path()
+    cache: dict[tuple[str, str, str, str], dict[str, dict[str, float | None]]] = {}
     output_rows: list[dict[str, str]] = []
     audit_rows: list[dict[str, str]] = []
     initial_cache_size = len(cache)
@@ -2243,6 +2278,7 @@ def build_phase02_records(
         audit_rows.append(audit_row)
         if progress_callback:
             fresh_queries = max(len(cache) - initial_cache_size, 0)
+            fresh_queries = int(cache_stats.get("cache_misses", 0) or 0)
             cached_rows = max(0, index - fresh_queries)
             phase_percent = 34 + min(7, round((index / total_rows) * 7))
             progress_callback(

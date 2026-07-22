@@ -14,9 +14,11 @@ from openpyxl import Workbook, load_workbook
 from config_env import (
     get_prediction_bridge_dev_row_limit,
     get_preprocess_validation_enabled,
+    resolve_shared_cache_dir,
 )
 from preprocess import ea_pipeline
 from preprocess.soil_enrichment import enrich_manual_bbox_prediction_soils
+from shared_cache import merge_nasa_cache_json_into_sqlite, merge_soil_cache_json_into_sqlite
 
 
 PHASE_DIR_NAMES = {
@@ -53,8 +55,8 @@ ProgressCallback = Callable[[int, str, str, dict[str, object] | None], None]
 LEGACY_OPTIONAL_HEADERS = {"Plot No."}
 DG_HEADER_PATTERN = re.compile(r"^DG\d+$")
 TEMP_SOURCE_ROW_ID_HEADER = "__app_source_row_id"
-APP_SHARED_NASA_CACHE = Path(__file__).resolve().parents[1] / ".cache" / "nasa_power_cache.json"
-APP_SHARED_SOIL_CACHE = Path(__file__).resolve().parents[1] / ".cache" / "soilgrids_cache.json"
+APP_SHARED_NASA_CACHE = resolve_shared_cache_dir() / "nasa_power_cache.json"
+APP_SHARED_SOIL_CACHE = resolve_shared_cache_dir() / "soilgrids_cache.json"
 POINT_UPLOAD_REQUIRED_HEADERS = (
     "_GPS coordinates_latitude",
     "_GPS coordinates_longitude",
@@ -283,6 +285,30 @@ def merge_nasa_cache_files(source_cache: Path, destination_cache: Path) -> None:
         json.dumps(destination_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    merge_nasa_cache_json_into_sqlite(destination_cache)
+
+
+def merge_soil_cache_files(source_cache: Path, destination_cache: Path) -> None:
+    source_payload = load_nasa_cache_payload(source_cache)
+    if not source_payload:
+        return
+    destination_payload = load_nasa_cache_payload(destination_cache)
+    source_points = source_payload.get("points", {}) if isinstance(source_payload, dict) else {}
+    destination_points = destination_payload.get("points", {}) if isinstance(destination_payload, dict) else {}
+    merged_payload = dict(destination_payload) if isinstance(destination_payload, dict) else {}
+    if isinstance(destination_points, dict) and isinstance(source_points, dict):
+        merged_points = dict(destination_points)
+        merged_points.update(source_points)
+        merged_payload.update(source_payload)
+        merged_payload["points"] = merged_points
+    else:
+        merged_payload.update(source_payload)
+    destination_cache.parent.mkdir(parents=True, exist_ok=True)
+    destination_cache.write_text(
+        json.dumps(merged_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    merge_soil_cache_json_into_sqlite(destination_cache)
 
 
 def is_saved_model_manual_bbox_prediction(
@@ -1053,10 +1079,6 @@ def run_preprocess_pipeline(
                 "Running the preprocess climate stage and querying NASA POWER for valid phenological windows.",
                 None,
             )
-        phase02_cache = phase_dirs["phase02"] / "nasa_power_cache.json"
-        if APP_SHARED_NASA_CACHE.exists() and not phase02_cache.exists():
-            phase02_cache.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(APP_SHARED_NASA_CACHE, phase02_cache)
         phase02_headers, phase02_records, phase02_metadata = ea_pipeline.build_phase02_records(
             phase01_headers,
             phase01_records,
@@ -1108,8 +1130,6 @@ def run_preprocess_pipeline(
                 )
             ),
         )
-        if phase02_cache.exists():
-            merge_nasa_cache_files(phase02_cache, APP_SHARED_NASA_CACHE)
         if saved_model_manual_bbox_prediction:
             if progress_callback:
                 progress_callback(
@@ -1129,7 +1149,7 @@ def run_preprocess_pipeline(
                 cache_path=phase02_soil_cache,
             )
             if phase02_soil_cache.exists():
-                merge_nasa_cache_files(phase02_soil_cache, APP_SHARED_SOIL_CACHE)
+                merge_soil_cache_files(phase02_soil_cache, APP_SHARED_SOIL_CACHE)
             phase02_metadata.update(soil_metadata)
             if progress_callback:
                 progress_callback(

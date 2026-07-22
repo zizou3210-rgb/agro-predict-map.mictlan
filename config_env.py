@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 APP_DIR = Path(__file__).resolve().parent
+APP_RUNTIME_NAME = "MictlanAgriXGBoost"
 APP_ENV_FILE = APP_DIR / ".env"
 APP_PACKAGE_FILE = APP_DIR / "package.json"
 APP_SETTINGS_ENV_KEYS = (
@@ -27,6 +28,33 @@ SUPPORTED_FEATUREHERO_METRICS = {
     "root_mean_squared_error",
 }
 SUPPORTED_NASA_POWER_RESOLUTION_KM = set(range(1, 11))
+
+
+def resolve_runtime_root() -> Path:
+    override = os.environ.get("APP_RUNTIME_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    home = Path.home()
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / APP_RUNTIME_NAME
+        return home / "AppData" / "Local" / APP_RUNTIME_NAME
+
+    if os.sys.platform == "darwin":
+        return home / "Library" / "Application Support" / APP_RUNTIME_NAME
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+    if xdg_data_home and "/snap/code/" in xdg_data_home:
+        return home / ".local" / "share" / APP_RUNTIME_NAME
+    if xdg_data_home:
+        return Path(xdg_data_home).expanduser() / APP_RUNTIME_NAME
+    return home / ".local" / "share" / APP_RUNTIME_NAME
+
+
+def resolve_shared_cache_dir() -> Path:
+    return resolve_runtime_root() / "cache"
 
 
 def load_app_env(env_file: Path | None = None) -> dict[str, str]:

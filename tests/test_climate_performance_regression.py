@@ -86,6 +86,8 @@ class ClimatePerformanceRegressionTest(unittest.TestCase):
         try:
             with patch("ce_pipeline.phase03.script03._resolve_prepared_raster_path", side_effect=fake_resolve), patch(
                 "ce_pipeline.phase03.script03._sample_raster_value", side_effect=fake_sample
+            ), patch(
+                "ce_pipeline.phase03.script03.get_nasa_cache_entry", return_value=None
             ):
                 script03._CHC_PREPARED_RASTER_PATHS = {
                     ("chirps", "2026-01-01"): Path("/tmp/chirps-2026-01-01.tif"),
@@ -102,6 +104,80 @@ class ClimatePerformanceRegressionTest(unittest.TestCase):
         finally:
             script03._CHC_PIXEL_DAILY_SAMPLE_CACHE = original_cache
             script03._CHC_PREPARED_RASTER_PATHS = {}
+
+    def test_precompute_chc_series_batches_reuses_pixel_daily_scan_for_multiple_windows(self) -> None:
+        cache = {}
+        sample_calls: list[str] = []
+        persisted_entries = {}
+        series_items = [
+            (
+                ("CHC_0p05_R1775C4250", "2026-01-01", "2026-01-03"),
+                {
+                    "latitude": "1.2498",
+                    "longitude": "32.5002",
+                    "date_of_planting": "2026-01-01",
+                    "date_of_harvesting": "2026-01-03",
+                },
+            ),
+            (
+                ("CHC_0p05_R1775C4250", "2026-01-02", "2026-01-03"),
+                {
+                    "latitude": "1.2498",
+                    "longitude": "32.5002",
+                    "date_of_planting": "2026-01-02",
+                    "date_of_harvesting": "2026-01-03",
+                },
+            ),
+        ]
+
+        def fake_resolve(dataset: str, current_date: date, cache_dir):  # noqa: ANN001
+            return Path(f"/tmp/{dataset}-{current_date.isoformat()}.tif")
+
+        def fake_sample(path, **kwargs):  # noqa: ANN001
+            sample_calls.append(Path(path).name)
+            name = Path(path).name.lower()
+            if "chirps" in name:
+                return 1.0
+            if "tmax" in name:
+                return 30.0
+            return 10.0
+
+        with patch("ce_pipeline.phase03.script03._resolve_prepared_raster_path", side_effect=fake_resolve), patch(
+            "ce_pipeline.phase03.script03._sample_raster_value", side_effect=fake_sample
+        ), patch(
+            "ce_pipeline.phase03.script03.get_nasa_cache_entry", return_value=None
+        ), patch(
+            "ce_pipeline.phase03.script03.get_nasa_cache_entries", return_value={}
+        ), patch(
+            "ce_pipeline.phase03.script03.upsert_nasa_cache_entries",
+            side_effect=lambda entries: persisted_entries.update(entries),
+        ):
+            script03._CHC_PREPARED_RASTER_PATHS = {
+                ("chirps", "2026-01-01"): Path("/tmp/chirps-2026-01-01.tif"),
+                ("chirts_tmax", "2026-01-01"): Path("/tmp/CHIRTS-ERA5.daily_Tmax.2026.01.01.tif"),
+                ("chirts_tmin", "2026-01-01"): Path("/tmp/CHIRTS-ERA5.daily_Tmin.2026.01.01.tif"),
+                ("chirps", "2026-01-02"): Path("/tmp/chirps-2026-01-02.tif"),
+                ("chirts_tmax", "2026-01-02"): Path("/tmp/CHIRTS-ERA5.daily_Tmax.2026.01.02.tif"),
+                ("chirts_tmin", "2026-01-02"): Path("/tmp/CHIRTS-ERA5.daily_Tmin.2026.01.02.tif"),
+                ("chirps", "2026-01-03"): Path("/tmp/chirps-2026-01-03.tif"),
+                ("chirts_tmax", "2026-01-03"): Path("/tmp/CHIRTS-ERA5.daily_Tmax.2026.01.03.tif"),
+                ("chirts_tmin", "2026-01-03"): Path("/tmp/CHIRTS-ERA5.daily_Tmin.2026.01.03.tif"),
+            }
+            stats = script03.precompute_chc_series_batches(series_items, cache, worker_count=2)
+
+        self.assertEqual(stats["pixel_groups"], 1)
+        self.assertEqual(stats["series_materialized"], 2)
+        self.assertEqual(len(sample_calls), 9)
+        self.assertEqual(len(persisted_entries), 2)
+        self.assertEqual(
+            cache[("1.22500", "32.52500", "2026-01-01", "2026-01-03")]["T2M"]["20260101"],
+            20.0,
+        )
+        self.assertEqual(
+            cache[("1.22500", "32.52500", "2026-01-02", "2026-01-03")]["PRECTOTCORR"]["20260102"],
+            1.0,
+        )
+        script03._CHC_PREPARED_RASTER_PATHS = {}
 
     def test_parallel_raster_cache_stays_bounded(self) -> None:
         class DummyImage:
@@ -136,7 +212,7 @@ class ClimatePerformanceRegressionTest(unittest.TestCase):
             cache_dir = Path(tmp_dir_name)
             with patch(
                 "ce_pipeline.phase03.script03._download_with_retries",
-                side_effect=lambda url, target: target.write_bytes(b"data"),
+                side_effect=lambda url, target: target.parent.mkdir(parents=True, exist_ok=True) or target.write_bytes(b"data"),
             ) as download_mock:
                 first_path, first_downloaded = script03._resolve_raster_path(
                     "chirps",
