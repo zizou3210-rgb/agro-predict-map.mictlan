@@ -1831,6 +1831,7 @@ def build_phase02_records_parallel_workspace(
             unique_series_queue = iter(unique_series_items)
             pending_futures: dict[object, tuple[str, str, str]] = {}
             queue_exhausted = False
+            last_heartbeat_at = time.monotonic()
             while pending_futures or not queue_exhausted:
                 while len(pending_futures) < worker_count and not queue_exhausted:
                     try:
@@ -1850,7 +1851,12 @@ def build_phase02_records_parallel_workspace(
                     return_when=FIRST_COMPLETED,
                 )
                 if not done_futures:
+                    now = time.monotonic()
+                    if now - last_heartbeat_at >= 10.0:
+                        report_parallel_series_progress("__heartbeat__", 0, 1, completed=False, force=True)
+                        last_heartbeat_at = now
                     continue
+                last_heartbeat_at = time.monotonic()
 
                 for future in done_futures:
                     series_key, output_row, audit_row, local_stats = future.result()
