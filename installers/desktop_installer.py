@@ -273,6 +273,44 @@ def sanitize_windows_bundled_runtime(app_dir: Path) -> None:
         pyvenv_cfg.unlink()
 
 
+def resolve_running_windows_runtime_dir() -> Path | None:
+    if platform.system() != "Windows":
+        return None
+    executable = Path(sys.executable).resolve()
+    runtime_dir = executable.parent
+    if executable.name.lower() not in {"python.exe", "python3.exe"}:
+        return None
+    required_entries = [
+        runtime_dir / "python.exe",
+        runtime_dir / "Lib",
+        runtime_dir / "DLLs",
+    ]
+    if all(entry.exists() for entry in required_entries):
+        return runtime_dir
+    return None
+
+
+def copy_windows_runtime_fallback(app_dir: Path) -> str:
+    source_runtime_dir = resolve_running_windows_runtime_dir()
+    if source_runtime_dir is None:
+        raise FileNotFoundError(
+            "The installer could not locate its own Windows Python runtime to use as a fallback payload."
+        )
+    target_runtime_dir = app_dir / "python-runtime"
+    console_log(f"[installer] Copying fallback Windows runtime from active interpreter: {source_runtime_dir}")
+    if target_runtime_dir.exists() and not should_preserve_windows_path(Path("python-runtime")):
+        remove_existing_path(target_runtime_dir)
+    elif target_runtime_dir.exists() and platform.system() == "Windows":
+        try:
+            remove_existing_path(target_runtime_dir)
+        except OSError as exc:
+            console_log(f"[installer] Existing installed runtime is in use; fallback copy skipped: {exc}")
+            return f"Fallback Windows runtime could not replace the existing runtime because it is in use: {exc}"
+    shutil.copytree(source_runtime_dir, target_runtime_dir, dirs_exist_ok=True)
+    sanitize_windows_bundled_runtime(app_dir)
+    return f"Fallback Windows runtime copied from active interpreter: {source_runtime_dir}"
+
+
 def validate_python_runtime(python_exec: str, *, cwd: Path | None = None) -> tuple[bool, str]:
     try:
         result = subprocess.run(
@@ -807,6 +845,9 @@ def install_windows() -> str:
     install_root, copied_entries = stage_application_snapshot()
     runtime_copy_message = stage_bundled_runtime(resolve_installed_app_dir(), "windows")
     console_log(f"[installer] {runtime_copy_message}")
+    if "empty" in runtime_copy_message.lower():
+        runtime_copy_message = f"{runtime_copy_message} {copy_windows_runtime_fallback(resolve_installed_app_dir())}"
+        console_log(f"[installer] {runtime_copy_message}")
     sanitize_windows_bundled_runtime(resolve_installed_app_dir())
     bundled_python = resolve_bundled_python_command(resolve_installed_app_dir(), "windows")
     if not bundled_python:
@@ -816,10 +857,20 @@ def install_windows() -> str:
         cwd=resolve_installed_app_dir() / "python-runtime",
     )
     if not runtime_ok:
-        raise RuntimeError(
-            "The bundled Windows Python runtime is not relocatable after installation. "
-            f"Validation failed for {bundled_python}.\n{runtime_details}"
+        fallback_message = copy_windows_runtime_fallback(resolve_installed_app_dir())
+        console_log(f"[installer] {fallback_message}")
+        bundled_python = resolve_bundled_python_command(resolve_installed_app_dir(), "windows")
+        if not bundled_python:
+            raise FileNotFoundError("Bundled Python 3.12 was not found for Windows installation after fallback copy.")
+        runtime_ok, runtime_details = validate_python_runtime(
+            bundled_python,
+            cwd=resolve_installed_app_dir() / "python-runtime",
         )
+        if not runtime_ok:
+            raise RuntimeError(
+                "The bundled Windows Python runtime is not relocatable after installation, even after fallback copy. "
+                f"Validation failed for {bundled_python}.\n{runtime_details}"
+            )
     console_log(f"[installer] Bundled Windows runtime validated with sys.prefix={runtime_details}")
     console_log(f"[installer] Using bundled Python: {bundled_python}")
     runtime_bootstrap_message = bootstrap_featurehero_runtime(
