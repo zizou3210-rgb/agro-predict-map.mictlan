@@ -44,6 +44,7 @@ REQUIRED_APP_ENTRIES = [
     "index.html",
     "manifest.webmanifest",
     "server.py",
+    "shared_cache.py",
     "service-worker.js",
     "styles.css",
     "workbook_preview.py",
