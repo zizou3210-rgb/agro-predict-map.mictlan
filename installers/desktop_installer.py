@@ -193,6 +193,15 @@ def remove_path_with_retries(target: Path, *, attempts: int = 3, delay_seconds: 
         raise last_error
 
 
+def remove_existing_path(target: Path) -> None:
+    if not target.exists():
+        return
+    if target.is_dir():
+        remove_path_with_retries(target)
+        return
+    target.unlink()
+
+
 def resolve_featurehero_runtime_dir(app_dir: Path | None = None) -> Path:
     base_app_dir = app_dir or resolve_installed_app_dir()
     return base_app_dir / "resources" / "featurehero" / ".venv"
@@ -659,22 +668,29 @@ def stage_bundled_runtime(app_dir: Path, platform_name: str) -> str:
         return f"No bundled runtime was found for {platform_name}; fallback bootstrap will be used."
 
     copied_any = False
+    preserved_entries: list[str] = []
     for child in bundled_runtime_dir.iterdir():
         destination = app_dir / child.name
-        if destination.exists():
-            if destination.is_dir():
-                shutil.rmtree(destination)
+        try:
+            remove_existing_path(destination)
+            if child.is_dir():
+                shutil.copytree(child, destination, symlinks=True)
             else:
-                destination.unlink()
-        if child.is_dir():
-            shutil.copytree(child, destination, symlinks=True)
-        else:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(child, destination)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(child, destination)
+        except OSError as exc:
+            if platform_name == "windows" and child.name == "python-runtime" and destination.exists():
+                console_log(f"[installer] Reusing existing locked runtime at {destination}: {exc}")
+                preserved_entries.append(child.name)
+                continue
+            raise
         copied_any = True
 
     if not copied_any:
         return f"Bundled runtime directory for {platform_name} was empty; fallback bootstrap will be used."
+    if preserved_entries:
+        preserved = ", ".join(sorted(preserved_entries))
+        return f"Bundled runtime copied from {bundled_runtime_dir}, preserving existing entries in use: {preserved}."
     return f"Bundled runtime copied from {bundled_runtime_dir}."
 
 
@@ -682,10 +698,12 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
     install_root = resolve_install_root()
     console_log(f"[installer] Installing snapshot into {install_root}")
     app_install_dir = resolve_installed_app_dir()
+    is_windows = platform.system() == "Windows"
     if app_install_dir.exists():
-        if platform.system() == "Windows":
+        if is_windows:
             stop_running_windows_processes(install_root)
-        remove_path_with_retries(app_install_dir)
+        else:
+            remove_path_with_retries(app_install_dir)
     app_install_dir.mkdir(parents=True, exist_ok=True)
 
     copied_entries: list[str] = []
@@ -696,6 +714,9 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
             if entry_name in REQUIRED_APP_ENTRIES:
                 raise FileNotFoundError(f"Missing required app entry for installer snapshot: {source}")
             continue
+        destination_root = app_install_dir / entry_name
+        if destination_root.exists():
+            remove_existing_path(destination_root)
         if source.is_dir():
             for child in source.iterdir():
                 relative_child = Path(entry_name) / child.name
