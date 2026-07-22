@@ -169,7 +169,11 @@ def _handle_remove_readonly(func, path: str, exc_info: object) -> None:
         os.chmod(path, 0o700)
         func(path)
     except OSError:
-        raise exc_info[1]
+        if isinstance(exc_info, BaseException):
+            raise exc_info
+        if isinstance(exc_info, tuple) and len(exc_info) > 1 and isinstance(exc_info[1], BaseException):
+            raise exc_info[1]
+        raise
 
 
 def remove_path_with_retries(target: Path, *, attempts: int = 3, delay_seconds: float = 1.0) -> None:
