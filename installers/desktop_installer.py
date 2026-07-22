@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -163,6 +164,31 @@ def resolve_state_file() -> Path:
     return resolve_install_root() / INSTALLER_STATE_NAME
 
 
+def _handle_remove_readonly(func, path: str, exc_info: object) -> None:
+    try:
+        os.chmod(path, 0o700)
+        func(path)
+    except OSError:
+        raise exc_info[1]
+
+
+def remove_path_with_retries(target: Path, *, attempts: int = 3, delay_seconds: float = 1.0) -> None:
+    last_error: OSError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            shutil.rmtree(target, onexc=_handle_remove_readonly)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            last_error = exc
+            console_log(f"[installer] Failed to remove {target} on attempt {attempt}/{attempts}: {exc}")
+            if attempt < attempts:
+                time.sleep(delay_seconds)
+    if last_error is not None:
+        raise last_error
+
+
 def resolve_featurehero_runtime_dir(app_dir: Path | None = None) -> Path:
     base_app_dir = app_dir or resolve_installed_app_dir()
     return base_app_dir / "resources" / "featurehero" / ".venv"
@@ -200,6 +226,47 @@ def resolve_bundled_python_command(app_dir: Path | None = None, platform_name: s
         if candidate.exists():
             return str(candidate)
     return None
+
+
+def stop_running_windows_processes(install_root: Path) -> None:
+    if platform.system() != "Windows":
+        return
+
+    normalized_root = str(install_root).replace("\\", "\\\\").replace("'", "''").lower()
+    script = (
+        "$root = '" + normalized_root + "'; "
+        "$killed = 0; "
+        "Get-CimInstance Win32_Process | ForEach-Object { "
+        "$exe = [string]$_.ExecutablePath; "
+        "$cmd = [string]$_.CommandLine; "
+        "$exeLower = $exe.ToLower(); "
+        "$cmdLower = $cmd.ToLower(); "
+        "if (($exeLower -and $exeLower.StartsWith($root)) -or ($cmdLower -and $cmdLower.Contains($root))) { "
+        "if ($_.ProcessId -ne $PID) { "
+        "try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $killed++ } catch {} "
+        "} "
+        "} "
+        "}; "
+        "Write-Output $killed"
+    )
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        killed = result.stdout.strip() or "0"
+        console_log(f"[installer] Windows processes stopped before update: {killed}")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        console_log(f"[installer] Could not stop previous Windows processes automatically: {exc}")
 
 
 def iter_runtime_python_candidates(venv_dir: Path) -> list[Path]:
@@ -612,7 +679,9 @@ def stage_application_snapshot() -> tuple[Path, list[str]]:
     console_log(f"[installer] Installing snapshot into {install_root}")
     app_install_dir = resolve_installed_app_dir()
     if app_install_dir.exists():
-        shutil.rmtree(app_install_dir)
+        if platform.system() == "Windows":
+            stop_running_windows_processes(install_root)
+        remove_path_with_retries(app_install_dir)
     app_install_dir.mkdir(parents=True, exist_ok=True)
 
     copied_entries: list[str] = []
