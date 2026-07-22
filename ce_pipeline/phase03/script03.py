@@ -469,9 +469,11 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
 
 def _resolve_prepared_raster_path(dataset: str, current_date: date, cache_dir: Path) -> Path:
     prepared = _CHC_PREPARED_RASTER_PATHS.get((dataset, current_date.isoformat()))
-    if prepared is not None:
+    if prepared is not None and prepared.exists():
         return prepared
-    target_path, _ = _resolve_raster_request(dataset, current_date, cache_dir)
+    target_path, _ = _resolve_raster_path(dataset, current_date, cache_dir)
+    if prepared is not None and prepared != target_path:
+        _CHC_PREPARED_RASTER_PATHS[(dataset, current_date.isoformat())] = target_path
     return target_path
 
 
