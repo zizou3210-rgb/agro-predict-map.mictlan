@@ -340,7 +340,20 @@ def _build_worker_progress_summary(worker_snapshot: dict[str, object]) -> str:
     processed_days = int(worker_snapshot.get("processed_days", 0) or 0)
     total_days = int(worker_snapshot.get("total_days", 0) or 0)
     active_seconds = round(float(worker_snapshot.get("active_seconds", 0.0) or 0.0), 1)
-    summary = f"{series}: {processed_days}/{max(total_days, 1)} days"
+    estimated_union_fraction = _estimate_worker_union_fraction(worker_snapshot)
+    estimated_resolved_days = min(
+        max(int(round(estimated_union_fraction * max(total_days, 1))), processed_days),
+        max(total_days, 1),
+    )
+    if processed_days > 0:
+        summary = f"{series}: {processed_days}/{max(total_days, 1)} days"
+    elif current_date:
+        summary = (
+            f"{series}: resolved through {current_date} "
+            f"({estimated_resolved_days}/{max(total_days, 1)} days est.)"
+        )
+    else:
+        summary = f"{series}: {processed_days}/{max(total_days, 1)} days"
     if current_date:
         summary += f", climate date {current_date}"
     if current_dataset and current_dataset not in {"", "daily_raster_plan_resolved"}:
@@ -358,9 +371,14 @@ def _build_worker_union_progress(worker_snapshot: dict[str, object] | None) -> s
         return ""
     processed_days = int(worker_snapshot.get("processed_days", 0) or 0)
     total_days = max(int(worker_snapshot.get("total_days", 0) or 0), 1)
-    union_fraction = min(max(processed_days / total_days, 0.0), 1.0)
+    if processed_days > 0:
+        union_fraction = min(max(processed_days / total_days, 0.0), 1.0)
+        union_days = processed_days
+    else:
+        union_fraction = _estimate_worker_union_fraction(worker_snapshot)
+        union_days = min(max(int(round(union_fraction * total_days)), 0), total_days)
     return (
-        f"Union scan {processed_days}/{total_days} days "
+        f"Union scan {union_days}/{total_days} days "
         f"({union_fraction * 100:.1f}%)."
     )
 
