@@ -36,13 +36,17 @@ try:
     import certifi
 except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
     certifi = None
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 try:
     import rasterio
     from rasterio.windows import Window
 except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
     rasterio = None
     Window = None
+try:
+    from rasterio.errors import RasterioIOError
+except (ModuleNotFoundError, ImportError):  # pragma: no cover - optional runtime dependency
+    RasterioIOError = OSError
 
 from config_env import resolve_runtime_root
 from preprocess import ea_pipeline, soil_enrichment
@@ -194,6 +198,8 @@ _CHC_SERIES_AGGREGATION_CACHE: dict[int, dict[str, object]] = {}
 _CHC_WINDOW_METRICS_CACHE: dict[tuple[int, str, str], dict[str, float | None]] = {}
 _CHC_PIXEL_DAILY_SAMPLE_CACHE: dict[tuple[str, str, str], float | None] = {}
 _CHC_PREPARED_RASTER_PATHS: dict[tuple[str, str], Path] = {}
+_INVALID_RASTER_PATHS_LOCK = Lock()
+_INVALID_RASTER_PATHS: set[Path] = set()
 _CHC_PARALLEL_PROGRESS_MODE = False
 _CHC_PARALLEL_PROGRESS_LOCK = Lock()
 _CHC_DEBUG_LOCK = Lock()
@@ -626,6 +632,87 @@ def _resolve_raster_request(dataset: str, current_date: date, cache_dir: Path) -
     return dataset_dir / filename, url
 
 
+def _mark_invalid_raster_path(path: Path) -> None:
+    with _INVALID_RASTER_PATHS_LOCK:
+        _INVALID_RASTER_PATHS.add(path.resolve())
+
+
+def _clear_invalid_raster_path(path: Path) -> None:
+    with _INVALID_RASTER_PATHS_LOCK:
+        _INVALID_RASTER_PATHS.discard(path.resolve())
+
+
+def _is_invalid_raster_path(path: Path) -> bool:
+    with _INVALID_RASTER_PATHS_LOCK:
+        return path.resolve() in _INVALID_RASTER_PATHS
+
+
+def _drop_raster_runtime_caches_for_path(path: Path) -> None:
+    resolved_path = path.resolve()
+    cache = _get_thread_raster_image_cache()
+    entry = cache.pop(resolved_path, None)
+    if isinstance(entry, dict):
+        image = entry.get("image")
+        if isinstance(image, Image.Image):
+            image.close()
+        dataset = entry.get("dataset")
+        if dataset is not None and hasattr(dataset, "close"):
+            dataset.close()
+    with _RASTER_METADATA_LOCK:
+        _RASTER_METADATA_CACHE.pop(resolved_path, None)
+    with _RASTER_PIXEL_INDEX_CACHE_LOCK:
+        stale_keys = [key for key in _RASTER_PIXEL_INDEX_CACHE if len(key) >= 2]
+        if stale_keys:
+            _RASTER_PIXEL_INDEX_CACHE.clear()
+
+
+def _should_retry_invalid_raster(exc: Exception) -> bool:
+    if isinstance(exc, (UnidentifiedImageError, RasterioIOError, OSError)):
+        return True
+    if isinstance(exc, RuntimeError):
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "missing geotiff metadata",
+                "missing rasterio metadata",
+                "could not access climate raster",
+                "could not access rasterio dataset",
+                "could not access climate raster pixels",
+            )
+        )
+    return False
+
+
+def _invalidate_and_remove_raster(path: Path, *, dataset: str, current_date: date, reason: Exception) -> None:
+    resolved_path = path.resolve()
+    _mark_invalid_raster_path(resolved_path)
+    _drop_raster_runtime_caches_for_path(resolved_path)
+    append_thread_climate_debug_log(
+        "raster_invalidated",
+        {
+            "dataset": dataset,
+            "target_date": current_date.isoformat(),
+            "target_path": str(resolved_path),
+            "error_type": type(reason).__name__,
+            "error": str(reason),
+        },
+    )
+    try:
+        resolved_path.unlink(missing_ok=True)
+    except OSError as unlink_error:
+        append_thread_climate_debug_log(
+            "raster_invalidation_unlink_failed",
+            {
+                "dataset": dataset,
+                "target_date": current_date.isoformat(),
+                "target_path": str(resolved_path),
+                "error_type": type(unlink_error).__name__,
+                "error": str(unlink_error),
+            },
+        )
+
+
 def _build_ssl_context() -> ssl.SSLContext:
     if certifi is not None:
         return ssl.create_default_context(cafile=certifi.where())
@@ -754,7 +841,7 @@ def _download_with_retries(url: str, target_path: Path) -> None:
 
 def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> tuple[Path, bool]:
     target_path, url = _resolve_raster_request(dataset, current_date, cache_dir)
-    if target_path.exists():
+    if target_path.exists() and not _is_invalid_raster_path(target_path):
         append_thread_climate_debug_log(
             "raster_path_resolved",
             {
@@ -788,6 +875,19 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
             },
         )
         downloaded = False
+        if _is_invalid_raster_path(target_path) and target_path.exists():
+            append_thread_climate_debug_log(
+                "raster_path_forced_refresh",
+                {
+                    "dataset": dataset,
+                    "target_date": current_date.isoformat(),
+                    "target_path": str(target_path),
+                },
+            )
+            try:
+                target_path.unlink()
+            except FileNotFoundError:
+                pass
         target_exists = target_path.exists()
         append_thread_climate_debug_log(
             "raster_path_checked",
@@ -820,6 +920,7 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
                     "download_seconds": round(max(0.0, time.monotonic() - download_started_at), 3),
                 },
             )
+        _clear_invalid_raster_path(target_path)
     append_thread_climate_debug_log(
         "raster_path_resolved",
         {
@@ -1064,16 +1165,58 @@ def _sample_chc_dataset_value(
             "raster_path": str(path),
         },
     )
-    value = _sample_raster_value(
-        path,
-        dataset=dataset,
-        pixel_id=pixel_id,
-        latitude=latitude,
-        longitude=longitude,
-        fill_value=fill_value,
-        latitude_min=latitude_min,
-        latitude_max=latitude_max,
-    )
+    try:
+        value = _sample_raster_value(
+            path,
+            dataset=dataset,
+            pixel_id=pixel_id,
+            latitude=latitude,
+            longitude=longitude,
+            fill_value=fill_value,
+            latitude_min=latitude_min,
+            latitude_max=latitude_max,
+        )
+    except Exception as exc:
+        if not _should_retry_invalid_raster(exc):
+            raise
+        append_phase03_debug_log(
+            get_thread_climate_debug_file(),
+            "serial_series_dataset_sample_retry_invalid_raster",
+            {
+                **get_thread_climate_debug_context(),
+                "dataset": dataset,
+                "raster_path": str(path),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        _invalidate_and_remove_raster(path, dataset=dataset, current_date=current_date, reason=exc)
+        refreshed_path, refreshed_downloaded = _resolve_raster_path(
+            dataset,
+            current_date,
+            resolve_shared_chc_cache_dir(),
+        )
+        set_thread_climate_debug_context(current_raster_path=str(refreshed_path))
+        append_phase03_debug_log(
+            get_thread_climate_debug_file(),
+            "serial_series_dataset_sample_retry_resolved",
+            {
+                **get_thread_climate_debug_context(),
+                "dataset": dataset,
+                "raster_path": str(refreshed_path),
+                "downloaded": refreshed_downloaded,
+            },
+        )
+        value = _sample_raster_value(
+            refreshed_path,
+            dataset=dataset,
+            pixel_id=pixel_id,
+            latitude=latitude,
+            longitude=longitude,
+            fill_value=fill_value,
+            latitude_min=latitude_min,
+            latitude_max=latitude_max,
+        )
     with _CHC_PIXEL_DAILY_SAMPLE_CACHE_LOCK:
         _CHC_PIXEL_DAILY_SAMPLE_CACHE[cache_key] = value
     append_phase03_debug_log(
