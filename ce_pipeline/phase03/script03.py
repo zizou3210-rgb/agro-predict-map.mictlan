@@ -1474,6 +1474,18 @@ def _resolve_daily_raster_paths(
     cache_dir: Path,
 ) -> tuple[dict[str, Path], dict[str, bool]]:
     if _CHC_PREPARED_RASTER_PATHS:
+        set_thread_climate_debug_context(
+            current_date=current_date.isoformat(),
+            current_dataset="prepared_raster_paths",
+            current_raster_path=str(cache_dir),
+        )
+        append_thread_climate_debug_log(
+            "resolve_daily_raster_paths_prepared_started",
+            {
+                "target_date": current_date.isoformat(),
+                "prepared_entries": len(_CHC_PREPARED_RASTER_PATHS),
+            },
+        )
         return (
             {
                 "chirps": _resolve_prepared_raster_path("chirps", current_date, cache_dir),
@@ -1487,9 +1499,34 @@ def _resolve_daily_raster_paths(
             },
         )
 
+    set_thread_climate_debug_context(
+        current_date=current_date.isoformat(),
+        current_dataset="chirps",
+        current_raster_path=str(cache_dir),
+    )
     chirps_path, chirps_downloaded = _resolve_raster_path("chirps", current_date, cache_dir)
+    set_thread_climate_debug_context(
+        current_dataset="chirts_tmax",
+        current_raster_path=str(chirps_path),
+    )
     tmax_path, tmax_downloaded = _resolve_raster_path("chirts_tmax", current_date, cache_dir)
+    set_thread_climate_debug_context(
+        current_dataset="chirts_tmin",
+        current_raster_path=str(tmax_path),
+    )
     tmin_path, tmin_downloaded = _resolve_raster_path("chirts_tmin", current_date, cache_dir)
+    append_thread_climate_debug_log(
+        "resolve_daily_raster_paths_completed",
+        {
+            "target_date": current_date.isoformat(),
+            "chirps_path": str(chirps_path),
+            "chirps_downloaded": chirps_downloaded,
+            "chirts_tmax_path": str(tmax_path),
+            "chirts_tmax_downloaded": tmax_downloaded,
+            "chirts_tmin_path": str(tmin_path),
+            "chirts_tmin_downloaded": tmin_downloaded,
+        },
+    )
     return (
         {
             "chirps": chirps_path,
@@ -1513,7 +1550,38 @@ def _build_daily_raster_plan(
     daily_plan: list[tuple[date, dict[str, Path]]] = []
     current_date = start_date
     while current_date <= end_date:
+        set_thread_climate_debug_context(
+            current_date=current_date.isoformat(),
+            current_dataset="resolve_daily_raster_paths",
+            current_raster_path=str(cache_dir),
+        )
+        append_thread_climate_debug_log(
+            "daily_raster_plan_day_resolve_started",
+            {
+                "target_date": current_date.isoformat(),
+                "cache_dir": str(cache_dir),
+            },
+        )
         raster_paths, _download_flags = _resolve_daily_raster_paths(current_date, cache_dir)
+        set_thread_climate_debug_context(
+            current_dataset="daily_raster_plan_resolved",
+            current_raster_path="|".join(
+                [
+                    str(raster_paths["chirps"]),
+                    str(raster_paths["chirts_tmax"]),
+                    str(raster_paths["chirts_tmin"]),
+                ]
+            ),
+        )
+        append_thread_climate_debug_log(
+            "daily_raster_plan_day_resolve_completed",
+            {
+                "target_date": current_date.isoformat(),
+                "chirps_path": str(raster_paths["chirps"]),
+                "chirts_tmax_path": str(raster_paths["chirts_tmax"]),
+                "chirts_tmin_path": str(raster_paths["chirts_tmin"]),
+            },
+        )
         daily_plan.append((current_date, raster_paths))
         current_date += timedelta(days=1)
     return daily_plan
