@@ -5,10 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FEATUREHERO_DIR="$APP_DIR/resources/featurehero"
-FEATUREHERO_VENV_DIR="$FEATUREHERO_DIR/.venv"
 MACOS_RUNTIME_DIR="$SCRIPT_DIR/runtimes/macos"
-MACOS_RUNTIME_FEATUREHERO_DIR="$MACOS_RUNTIME_DIR/resources/featurehero"
-MACOS_RUNTIME_VENV_DIR="$MACOS_RUNTIME_FEATUREHERO_DIR/.venv"
+MACOS_RUNTIME_PYTHON_DIR="$MACOS_RUNTIME_DIR/python-installer"
+MACOS_RUNTIME_LIBOMP_DIR="$MACOS_RUNTIME_DIR/runtime-libs"
 
 if command -v python3.12 >/dev/null 2>&1; then
   PYTHON_BIN="python3.12"
@@ -27,16 +26,24 @@ if [ ! -d "$FEATUREHERO_DIR" ]; then
   exit 1
 fi
 
-echo "Preparando runtime nativo de macOS para FeatureHero..."
-rm -rf "$FEATUREHERO_VENV_DIR"
-"$PYTHON_BIN" -m venv "$FEATUREHERO_VENV_DIR"
-"$FEATUREHERO_VENV_DIR/bin/python" -m pip install --upgrade pip
-"$FEATUREHERO_VENV_DIR/bin/python" -m pip install "$FEATUREHERO_DIR"
+echo "Preparando payload nativo de macOS..."
+rm -rf "$MACOS_RUNTIME_DIR"
+mkdir -p "$MACOS_RUNTIME_PYTHON_DIR" "$MACOS_RUNTIME_LIBOMP_DIR"
 
-echo "Copiando runtime a installers/runtimes/macos..."
-rm -rf "$MACOS_RUNTIME_VENV_DIR"
-mkdir -p "$MACOS_RUNTIME_FEATUREHERO_DIR"
-cp -R "$FEATUREHERO_VENV_DIR" "$MACOS_RUNTIME_VENV_DIR"
+curl -L --fail --retry 3 \
+  https://www.python.org/ftp/python/3.12.4/python-3.12.4-macos11.pkg \
+  -o "$MACOS_RUNTIME_PYTHON_DIR/python-3.12.pkg"
+
+if command -v brew >/dev/null 2>&1; then
+  brew install libomp
+  libomp_prefix="$(brew --prefix libomp)"
+  cp "$libomp_prefix/lib/libomp.dylib" "$MACOS_RUNTIME_LIBOMP_DIR/libomp.dylib"
+else
+  echo "Homebrew no esta disponible; no se pudo preparar libomp.dylib."
+  exit 1
+fi
+
+echo "El instalador reconstruira resources/featurehero/.venv localmente en la maquina destino."
 
 echo "Generando paquete instalador nativo para macOS..."
 "$PYTHON_BIN" "$SCRIPT_DIR/build_native_runtime_packages.py"

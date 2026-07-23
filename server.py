@@ -91,7 +91,7 @@ CE_PHASE06_SCRIPT = CE_PIPELINE_DIR / "phase06" / "phase06.py"
 TOP_GERMPLASM_ENABLED = False
 APP_RUNTIME_NAME = "MictlanAgriXGBoost"
 FEATUREHERO_DIR = APP_DIR / "resources" / "featurehero"
-PIPELINE_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL")
+PIPELINE_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL", "rasterio")
 
 def get_preferred_pipeline_pythons() -> list[Path | None]:
     featurehero_venv = APP_DIR / "resources" / "featurehero" / ".venv"
@@ -1911,9 +1911,10 @@ def find_free_port() -> int:
 
 
 def get_missing_pipeline_modules(python_exec: Path) -> list[str]:
+    module_list = ",".join(repr(name) for name in PIPELINE_RUNTIME_MODULES)
     probe = (
         "import importlib.util, json; "
-        "mods=['featurehero','openpyxl','certifi','PIL']; "
+        f"mods=[{module_list}]; "
         "missing=[name for name in mods if importlib.util.find_spec(name) is None]; "
         "print(json.dumps(missing))"
     )

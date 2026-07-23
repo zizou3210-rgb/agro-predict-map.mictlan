@@ -38,6 +38,7 @@ WINDOWS_PRESERVED_PATHS = {
     Path("python-runtime"),
     Path("resources") / "featurehero" / ".venv",
 }
+FEATUREHERO_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL", "rasterio")
 REQUIRED_APP_ENTRIES = [
     "__init__.py",
     "config_env.py",
@@ -403,6 +404,38 @@ def python_version_tuple(python_exec: Path | str) -> tuple[int, int] | None:
         return None
 
 
+def get_missing_python_modules(python_exec: Path | str, modules: tuple[str, ...]) -> list[str]:
+    module_list = ",".join(repr(name) for name in modules)
+    probe = (
+        "import importlib.util, json; "
+        f"mods=[{module_list}]; "
+        "missing=[name for name in mods if importlib.util.find_spec(name) is None]; "
+        "print(json.dumps(missing))"
+    )
+    try:
+        result = subprocess.run(
+            [str(python_exec), "-c", probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=cleaned_python_env(),
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        stderr = getattr(exc, "stderr", "")
+        stdout = getattr(exc, "stdout", "")
+        details = str(stderr or stdout or exc).strip()
+        raise RuntimeError(
+            f"Could not validate Python runtime modules for {python_exec}: {details}"
+        ) from exc
+    try:
+        payload = json.loads(result.stdout.strip() or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Could not decode Python runtime module probe output for {python_exec}: {result.stdout!r}"
+        ) from exc
+    return [str(item) for item in payload if str(item).strip()]
+
+
 def resolve_python312_command() -> str | None:
     candidates = [
         shutil.which("python3.12"),
@@ -514,6 +547,16 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
         cwd=str(featurehero_dir),
         check=True,
         env=cleaned_python_env(),
+    )
+    missing_modules = get_missing_python_modules(venv_python, FEATUREHERO_RUNTIME_MODULES)
+    if missing_modules:
+        raise ModuleNotFoundError(
+            "The FeatureHero runtime is missing required modules after local installation: "
+            + ", ".join(missing_modules)
+        )
+    console_log(
+        "[installer] FeatureHero runtime validated with required modules: "
+        + ", ".join(FEATUREHERO_RUNTIME_MODULES)
     )
     return f"FeatureHero runtime prepared at {venv_dir}."
 
