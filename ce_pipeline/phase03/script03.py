@@ -365,6 +365,31 @@ def _build_worker_union_progress(worker_snapshot: dict[str, object] | None) -> s
     )
 
 
+def _estimate_worker_union_fraction(worker_snapshot: dict[str, object] | None) -> float:
+    if not isinstance(worker_snapshot, dict):
+        return 0.0
+    processed_days = int(worker_snapshot.get("processed_days", 0) or 0)
+    total_days = max(int(worker_snapshot.get("total_days", 0) or 0), 1)
+    if processed_days > 0:
+        return min(max(processed_days / total_days, 0.0), 1.0)
+    current_date_text = str(worker_snapshot.get("current_date") or "").strip()
+    union_start_text = str(worker_snapshot.get("union_start") or "").strip()
+    union_end_text = str(worker_snapshot.get("union_end") or "").strip()
+    if not current_date_text or not union_start_text or not union_end_text:
+        return 0.0
+    try:
+        current_date_value = date.fromisoformat(current_date_text)
+        union_start_value = date.fromisoformat(union_start_text)
+        union_end_value = date.fromisoformat(union_end_text)
+    except ValueError:
+        return 0.0
+    if union_end_value < union_start_value:
+        return 0.0
+    traversed_days = max((min(current_date_value, union_end_value) - union_start_value).days + 1, 0)
+    union_total_days = max((union_end_value - union_start_value).days + 1, 1)
+    return min(max(traversed_days / union_total_days, 0.0), 1.0)
+
+
 def _select_primary_active_worker(active_worker_sample: list[dict[str, object]]) -> dict[str, object] | None:
     if not active_worker_sample:
         return None
@@ -2585,6 +2610,15 @@ def report_parallel_series_progress(
     primary_worker_summary = _build_worker_progress_summary(primary_worker) if isinstance(primary_worker, dict) else ""
     primary_union_progress = _build_worker_union_progress(primary_worker)
     active_workers = len(active_worker_sample) if active_worker_sample else min(max(effective_series_total - completed_series, 0), worker_count)
+    estimated_visible_fraction_sum = 0.0
+    for worker_snapshot in active_worker_sample:
+        estimated_visible_fraction_sum += _estimate_worker_union_fraction(worker_snapshot)
+    estimated_overall_fraction = min(
+        max(estimated_visible_fraction_sum, 0.0) / max(effective_series_total, 1),
+        1.0,
+    )
+    effective_overall_fraction = max(overall_fraction, estimated_overall_fraction)
+
     details_payload = {
         "phase": "phase03",
         "climate_progress_stage": "compute",
@@ -2596,17 +2630,18 @@ def report_parallel_series_progress(
         "climate_active_worker_sample": active_worker_sample,
         "climate_primary_worker_summary": primary_worker_summary,
         "climate_primary_union_progress": primary_union_progress,
+        "climate_estimated_progress_fraction": estimated_overall_fraction,
         **(diagnostics if isinstance(diagnostics, dict) else {}),
     }
 
-    overall_percent = round(33 + (overall_fraction * 17), 1) if overall_fraction > 0 else 33.0
+    overall_percent = round(33 + (effective_overall_fraction * 17), 1) if effective_overall_fraction > 0 else 33.0
     if completed:
         message = (
             f"Computing climate windows from prepared rasters: completed {completed_series}/{effective_series_total} climate series. "
             f"{active_workers} worker{'s' if active_workers != 1 else ''} still active. "
             f"Current lead worker: {primary_worker_summary or 'waiting for worker detail'}. "
             f"{primary_union_progress} "
-            f"Phase03 climate workload progress {overall_fraction * 100:.1f}%."
+            f"Phase03 climate workload progress {effective_overall_fraction * 100:.1f}%."
         )
     else:
         message = (
@@ -2615,7 +2650,7 @@ def report_parallel_series_progress(
             f"{active_workers} worker{'s' if active_workers != 1 else ''} active. "
             f"Current lead worker: {primary_worker_summary or 'waiting for worker detail'}. "
             f"{primary_union_progress} "
-            f"Phase03 climate workload progress {overall_fraction * 100:.1f}%."
+            f"Phase03 climate workload progress {effective_overall_fraction * 100:.1f}%."
         )
 
     write_progress(
