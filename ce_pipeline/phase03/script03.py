@@ -335,12 +335,20 @@ def get_active_climate_worker_snapshots() -> list[dict[str, object]]:
 def _build_worker_progress_summary(worker_snapshot: dict[str, object]) -> str:
     series = str(worker_snapshot.get("series") or worker_snapshot.get("worker_label") or "unknown series").strip()
     current_date = str(worker_snapshot.get("current_date") or "").strip()
+    current_dataset = str(worker_snapshot.get("current_dataset") or "").strip()
+    current_raster_path = str(worker_snapshot.get("current_raster_path") or "").strip()
     processed_days = int(worker_snapshot.get("processed_days", 0) or 0)
     total_days = int(worker_snapshot.get("total_days", 0) or 0)
     active_seconds = round(float(worker_snapshot.get("active_seconds", 0.0) or 0.0), 1)
     summary = f"{series}: {processed_days}/{max(total_days, 1)} days"
     if current_date:
         summary += f", climate date {current_date}"
+    if current_dataset and current_dataset not in {"", "daily_raster_plan_resolved"}:
+        summary += f", dataset {current_dataset}"
+    if current_raster_path:
+        raster_name = Path(current_raster_path.split("|", 1)[0]).name
+        if raster_name and raster_name != current_raster_path:
+            summary += f", raster {raster_name}"
     summary += f", active {active_seconds}s"
     return summary
 
