@@ -1287,6 +1287,7 @@ const normalizeSelectedPredictionIdHeader = (value) => {
   return normalized === clearSelectionIdSentinel ? "" : normalized;
 };
 
+const getRawPredictionSelectedIdField = () => String(selectedPredictionIdField ?? "").trim();
 const getPredictionSelectedIdHeader = () => normalizeSelectedPredictionIdHeader(selectedPredictionIdField);
 const uploadedWorkbookPreviewCache = new WeakMap();
 
@@ -2618,7 +2619,7 @@ const populateEmbeddedPredictionIdSelector = (options = [], selectedValue = "") 
     { value: clearSelectionIdSentinel, label: "Clear Selection" },
     ...filteredOptionValues.map((value) => ({ value, label: value })),
   ];
-  const normalizedSelectedValue = normalizeSelectedPredictionIdHeader(selectedValue) || clearSelectionIdSentinel;
+  const normalizedSelectedValue = String(selectedValue ?? "").trim() || clearSelectionIdSentinel;
   germplasmSelectionIdPicker.hidden = !normalizedOptions.length;
   populateSelectionListbox(
     germplasmSelectionIdSelect,
@@ -3804,8 +3805,9 @@ const startPipelineJob = async (
   if (selectedGermplasmProjectionMode) {
     headers["X-Selected-Germplasm-Projection-Mode"] = selectedGermplasmProjectionMode;
   }
-  if (selectedPredictionIdField) {
-    headers["X-Selected-Id-Header"] = selectedPredictionIdField;
+  const rawSelectedIdField = getRawPredictionSelectedIdField();
+  if (rawSelectedIdField) {
+    headers["X-Selected-Id-Header"] = rawSelectedIdField;
   }
   const bridgeSourceFile = predictionBridgeState?.sourceFile ?? predictionBridgeState?.file ?? null;
   const usingBridgeSourceFile = Boolean(bridgeSourceFile) && file === bridgeSourceFile;
@@ -5792,7 +5794,7 @@ const loadPredictionGermplasmList = async (file, { sourceLabel = "workbook", mod
   availablePredictionIdFields = Array.isArray(payload?.id_field_candidates)
     ? payload.id_field_candidates.map((value) => String(value ?? "").trim()).filter(Boolean)
     : getPredictionIdFieldCandidatesFromPayload(payload);
-  selectedPredictionIdField = normalizeSelectedPredictionIdHeader(payload?.selected_id_header ?? "");
+  selectedPredictionIdField = String(payload?.selected_id_header ?? "Farm").trim() || "Farm";
   availablePredictionIdValuesByName = payload?.germplasm_id_values_by_name && typeof payload.germplasm_id_values_by_name === "object"
     ? payload.germplasm_id_values_by_name
     : {};
@@ -5850,7 +5852,7 @@ const applyPredictionIdFieldSelection = async (selectedHeaderOverride = "") => {
       selectedIdHeader: selectedHeader,
       mode: predictionGermplasmSourceMode,
     });
-  selectedPredictionIdField = normalizeSelectedPredictionIdHeader(payload?.selected_id_header ?? selectedHeader);
+  selectedPredictionIdField = String(payload?.selected_id_header ?? selectedHeader).trim() || selectedHeader;
   availableGermplasmNames = Array.isArray(payload.germplasm_names) ? payload.germplasm_names : [];
   availableGermplasmProfilesByName = payload?.germplasm_profiles_by_name && typeof payload.germplasm_profiles_by_name === "object"
     ? payload.germplasm_profiles_by_name
@@ -7354,17 +7356,26 @@ const validateFeatureCollection = (geojson) => {
     throw new Error("The pipeline did not return a valid GeoJSON feature collection.");
   }
 
-  if (!geojson.features.length) {
+  const validFeatures = geojson.features.filter((feature) => {
+    const latitude = asFloat(feature?.geometry?.coordinates?.[1]);
+    const longitude = asFloat(feature?.geometry?.coordinates?.[0]);
+    return latitude !== null && longitude !== null;
+  });
+
+  if (!validFeatures.length) {
     throw new Error("No valid Geocoordinates were returned by the processing pipeline.");
   }
 
-  geojson.features.forEach((feature) => {
-    const latitude = asFloat(feature?.geometry?.coordinates?.[1]);
-    const longitude = asFloat(feature?.geometry?.coordinates?.[0]);
-    if (latitude === null || longitude === null) {
-      throw new Error("The processed data contains Geocoordinates without valid coordinates.");
-    }
-  });
+  if (validFeatures.length !== geojson.features.length) {
+    return {
+      ...geojson,
+      metadata: {
+        ...(geojson?.metadata ?? {}),
+        total_features: validFeatures.length,
+      },
+      features: validFeatures,
+    };
+  }
 
   return geojson;
 };
@@ -7425,6 +7436,8 @@ const buildFeatureCollectionFromManualOverlay = (payload) => {
 const resolvePipelineGeojson = async (payload) => {
   const directGeojson = payload?.geojson;
   let directGeojsonError = null;
+  const overlayFallback = buildFeatureCollectionFromManualOverlay(payload);
+  const isRegionalManualPayload = String(payload?.summary?.climate_scope ?? "").trim() === "regional_manual";
   if (directGeojson) {
     try {
       return validateFeatureCollection(directGeojson);
@@ -7438,13 +7451,30 @@ const resolvePipelineGeojson = async (payload) => {
       });
     }
   }
+  if (isRegionalManualPayload && overlayFallback) {
+    return validateFeatureCollection(overlayFallback);
+  }
   const downloadUrl = String(payload?.geojson_download_url ?? payload?.raw_geojson_download_url ?? "").trim();
   if (!downloadUrl) {
+    if (overlayFallback) {
+      return validateFeatureCollection(overlayFallback);
+    }
     throw directGeojsonError ?? new Error("The pipeline did not return a valid GeoJSON feature collection.");
   }
-  const response = await fetch(downloadUrl, { method: "GET" });
+  let response;
+  try {
+    response = await fetch(downloadUrl, { method: "GET" });
+  } catch (error) {
+    if (overlayFallback) {
+      return validateFeatureCollection(overlayFallback);
+    }
+    throw error instanceof Error ? error : new Error(String(error));
+  }
   const geojson = await response.json().catch(() => null);
   if (!response.ok) {
+    if (overlayFallback) {
+      return validateFeatureCollection(overlayFallback);
+    }
     throw new Error("The pipeline GeoJSON artifact could not be loaded.");
   }
   try {
@@ -7457,7 +7487,6 @@ const resolvePipelineGeojson = async (payload) => {
       downloadUrl,
       jobId: payload?.summary?.job_id ?? payload?.job_id ?? null,
     });
-    const overlayFallback = buildFeatureCollectionFromManualOverlay(payload);
     if (overlayFallback) {
       return validateFeatureCollection(overlayFallback);
     }
