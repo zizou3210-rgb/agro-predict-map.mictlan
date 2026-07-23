@@ -1,4 +1,4 @@
-const CACHE_NAME = "ea-geo-app-v55";
+const CACHE_NAME = "ea-geo-app-v56";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -38,6 +38,7 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   const isSameOrigin = url.origin === self.location.origin;
+  const isApiRequest = isSameOrigin && url.pathname.startsWith("/api/");
   const isHtmlRequest =
     request.mode === "navigate"
     || url.pathname === "/"
@@ -50,6 +51,11 @@ self.addEventListener("fetch", (event) => {
 
   if (!isSameOrigin) {
     event.respondWith(fetch(request).catch(() => caches.match(request)));
+    return;
+  }
+
+  if (isApiRequest) {
+    event.respondWith(fetch(request));
     return;
   }
 

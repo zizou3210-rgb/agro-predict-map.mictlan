@@ -1285,9 +1285,9 @@ def expand_records_for_country_localities(
             expanded[LON_HEADER] = locality["longitude"]
             expanded["_GPS coordinates_altitude"] = ""
             expanded["_GPS coordinates_precision"] = ""
-            if forecast_planting_date:
+            if forecast_planting_date and not use_source_row_dates:
                 expanded[DATE_PLANTING_HEADER] = forecast_planting_date
-            if forecast_harvesting_date:
+            if forecast_harvesting_date and not use_source_row_dates:
                 expanded[DATE_HARVESTING_HEADER] = forecast_harvesting_date
             expanded[FORECAST_LOCALITY_HEADER] = locality["name"]
             expanded[FORECAST_LOCALITY_GEONAMEID_HEADER] = locality["geoname_id"]
@@ -1361,9 +1361,9 @@ def expand_records_for_manual_bbox_localities(
             expanded[LON_HEADER] = grid_cell["center_longitude"]
             expanded["_GPS coordinates_altitude"] = ""
             expanded["_GPS coordinates_precision"] = ""
-            if forecast_planting_date:
+            if forecast_planting_date and not use_source_row_dates:
                 expanded[DATE_PLANTING_HEADER] = forecast_planting_date
-            if forecast_harvesting_date:
+            if forecast_harvesting_date and not use_source_row_dates:
                 expanded[DATE_HARVESTING_HEADER] = forecast_harvesting_date
             expanded[FORECAST_LOCALITY_HEADER] = str(grid_cell["grid_cell_id"])
             expanded[FORECAST_LOCALITY_GEONAMEID_HEADER] = ""
@@ -1872,8 +1872,8 @@ def resolve_forecast_reference_dates(
 ) -> list[tuple[date, date]]:
     planting_template = parse_iso_date(forecast_planting_date)
     harvesting_template = parse_iso_date(forecast_harvesting_date)
-    current_year = date.today().year
-    reference_years = [current_year - offset for offset in range(1, years_back + 1)]
+    reference_year = planting_template.year - 1
+    reference_years = [reference_year - offset for offset in range(0, years_back)]
     return [
         (
             clamp_date_to_year(year, planting_template.month, planting_template.day),
@@ -1881,6 +1881,36 @@ def resolve_forecast_reference_dates(
         )
         for year in reference_years
     ]
+
+
+def resolve_climate_reference_dates(
+    *,
+    row_planting_date: str,
+    row_harvesting_date: str,
+    climate_override: dict[str, object] | None,
+) -> tuple[list[tuple[date, date]], str, str]:
+    use_source_row_dates = bool((climate_override or {}).get("use_source_row_dates"))
+    years_back = int((climate_override or {}).get("forecast_years_back") or 5)
+
+    if use_source_row_dates:
+        planting_value = str(row_planting_date or "").strip()
+        harvesting_value = str(row_harvesting_date or "").strip()
+    else:
+        planting_value = str((climate_override or {}).get("forecast_planting_date") or "").strip()
+        harvesting_value = str((climate_override or {}).get("forecast_harvesting_date") or "").strip()
+
+    if not planting_value or not harvesting_value:
+        return [], "", ""
+
+    return (
+        resolve_forecast_reference_dates(
+            planting_value,
+            harvesting_value,
+            years_back,
+        ),
+        planting_value,
+        harvesting_value,
+    )
 
 
 def _build_all_climate_windows(
@@ -2003,16 +2033,21 @@ def build_output_row(
             )
         return "", []
 
-    if climate_override and climate_override.get("forecast_planting_date") and climate_override.get("forecast_harvesting_date"):
+    reference_pairs: list[tuple[date, date]] = []
+    reference_planting_value = ""
+    reference_harvesting_value = ""
+    if climate_override:
+        reference_pairs, reference_planting_value, reference_harvesting_value = resolve_climate_reference_dates(
+            row_planting_date=str(row.get("date_of_planting") or ""),
+            row_harvesting_date=str(row.get("date_of_harvesting") or ""),
+            climate_override=climate_override,
+        )
+
+    if reference_pairs:
         regional_label = ""
         regional_tiles: list[tuple[float, float, float, float]] = []
         if climate_scope == "regional_country":
             regional_label, regional_tiles = resolve_regional_source()
-        reference_pairs = resolve_forecast_reference_dates(
-            str(climate_override["forecast_planting_date"]),
-            str(climate_override["forecast_harvesting_date"]),
-            int(climate_override.get("forecast_years_back", 5)),
-        )
         per_year_metrics: list[dict[str, float | None]] = []
         audit_windows: list[dict[str, str]] = []
         for planting_date, harvesting_date in reference_pairs:
@@ -2084,8 +2119,8 @@ def build_output_row(
             {
                 "latitude": row["latitude"],
                 "longitude": row["longitude"],
-                "date_of_planting": str(climate_override["forecast_planting_date"]),
-                "date_of_harvesting": str(climate_override["forecast_harvesting_date"]),
+                "date_of_planting": reference_planting_value,
+                "date_of_harvesting": reference_harvesting_value,
                 **latest_audit,
             }
         )

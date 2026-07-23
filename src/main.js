@@ -11,6 +11,21 @@ import { renderSelectColumnm } from "./selectColumnm.js";
 import { renderSelectColumnClassifier } from "./selectColumnClassifier.js";
 import { renderSelectionSummary } from "./summary.js";
 
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", async () => {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((registration) => registration.unregister()));
+      if ("caches" in window) {
+        const cacheKeys = await window.caches.keys();
+        await Promise.all(cacheKeys.map((key) => window.caches.delete(key)));
+      }
+    } catch (error) {
+      console.error("Could not clear service workers or caches from main app", error);
+    }
+  });
+}
+
 const width = 1000;
 const height = 680;
 const minZoom = 2;
@@ -399,6 +414,7 @@ let manualGridServerOverlayCache = new Map();
 let activeManualGridServerOverlayKey = "";
 let manualGridLastRenderedTransform = d3.zoomIdentity;
 let predictionProfileInteractionInProgress = false;
+let manualGridServerOverlayRequestKey = "";
 let datasetStore = {
   original: null,
   training: null,
@@ -771,6 +787,31 @@ const fetchManualGridProfileOverlayFromBackend = async (labels) => {
     throw new Error(payload?.error ?? "The processed profile overlay could not be loaded.");
   }
   return payload;
+};
+
+const ensureManualGridProfileOverlayForLabels = async (labels) => {
+  const selectionKey = buildManualGridOverlaySelectionKey(labels);
+  if (!selectionKey) {
+    return null;
+  }
+  if (manualGridServerOverlayCache.has(selectionKey)) {
+    return manualGridServerOverlayCache.get(selectionKey) ?? null;
+  }
+  if (manualGridServerOverlayRequestKey === selectionKey) {
+    return null;
+  }
+  manualGridServerOverlayRequestKey = selectionKey;
+  try {
+    const overlayPayload = await fetchManualGridProfileOverlayFromBackend(labels);
+    if (overlayPayload) {
+      manualGridServerOverlayCache.set(selectionKey, overlayPayload);
+    }
+    return overlayPayload;
+  } finally {
+    if (manualGridServerOverlayRequestKey === selectionKey) {
+      manualGridServerOverlayRequestKey = "";
+    }
+  }
 };
 
 const promptForDownloadFilename = (suggestedFilename = "prediction_output.xlsx") => {
@@ -1985,6 +2026,7 @@ const clearDataset = async (tab) => {
     manualGridServerOverlayCache = new Map();
     activeManualGridServerOverlayKey = "";
     manualGridLastRenderedTransform = d3.zoomIdentity;
+    manualGridServerOverlayRequestKey = "";
     setActivePredictionProfileHighlight("");
     setCheckedPredictionProfileLabels([]);
     predictionProfileSelectionTouched = false;
@@ -6477,12 +6519,7 @@ const runPredictionProfileInteractionWithLoading = async (action) => {
     if (isManualGridPredictionResult() && predictionProfileSelectionTouched && checkedLabels.size > 0) {
       const selectionKey = buildManualGridOverlaySelectionKey(checkedLabels);
       activeManualGridServerOverlayKey = selectionKey;
-      if (selectionKey && !manualGridServerOverlayCache.has(selectionKey)) {
-        const overlayPayload = await fetchManualGridProfileOverlayFromBackend(checkedLabels);
-        if (overlayPayload) {
-          manualGridServerOverlayCache.set(selectionKey, overlayPayload);
-        }
-      }
+      await ensureManualGridProfileOverlayForLabels(checkedLabels);
       renderManualGridOverlay(currentTransform);
     } else {
       activeManualGridServerOverlayKey = "";
@@ -7332,6 +7369,59 @@ const validateFeatureCollection = (geojson) => {
   return geojson;
 };
 
+const buildFeatureCollectionFromManualOverlay = (payload) => {
+  const summary = payload?.summary ?? {};
+  const overlay = summary?.manual_grid_overlay_base ?? null;
+  const heatSamples = Array.isArray(overlay?.heat_samples) ? overlay.heat_samples : [];
+  if (!heatSamples.length) {
+    return null;
+  }
+  const features = heatSamples
+    .map((sample, index) => {
+      const longitudeMin = asFloat(sample?.longitudeMin);
+      const longitudeMax = asFloat(sample?.longitudeMax);
+      const latitudeMin = asFloat(sample?.latitudeMin);
+      const latitudeMax = asFloat(sample?.latitudeMax);
+      if (
+        longitudeMin === null ||
+        longitudeMax === null ||
+        latitudeMin === null ||
+        latitudeMax === null
+      ) {
+        return null;
+      }
+      return {
+        type: "Feature",
+        geometry: {
+          type: "Point",
+          coordinates: [
+            (longitudeMin + longitudeMax) / 2,
+            (latitudeMin + latitudeMax) / 2,
+          ],
+        },
+        properties: {
+          row_number: index + 1,
+          "Forecast grid cell id": String(sample?.gridCellId ?? sample?.id ?? "").trim(),
+          "Prediction Profile": String(sample?.profileLabel ?? "").trim(),
+          Name: String(sample?.profileLabel ?? "").trim(),
+        },
+      };
+    })
+    .filter(Boolean);
+  if (!features.length) {
+    return null;
+  }
+  return {
+    type: "FeatureCollection",
+    metadata: {
+      attribute_count: 3,
+      total_features: features.length,
+      source_file_name: "prediction_display_overlay_fallback",
+    },
+    features,
+  };
+};
+
 const resolvePipelineGeojson = async (payload) => {
   const directGeojson = payload?.geojson;
   let directGeojsonError = null;
@@ -7340,6 +7430,12 @@ const resolvePipelineGeojson = async (payload) => {
       return validateFeatureCollection(directGeojson);
     } catch (error) {
       directGeojsonError = error instanceof Error ? error : new Error(String(error));
+      console.error("Inline pipeline GeoJSON validation failed.", {
+        error: directGeojsonError,
+        geojsonType: directGeojson?.type ?? null,
+        featureCount: Array.isArray(directGeojson?.features) ? directGeojson.features.length : null,
+        jobId: payload?.summary?.job_id ?? payload?.job_id ?? null,
+      });
     }
   }
   const downloadUrl = String(payload?.geojson_download_url ?? payload?.raw_geojson_download_url ?? "").trim();
@@ -7354,10 +7450,46 @@ const resolvePipelineGeojson = async (payload) => {
   try {
     return validateFeatureCollection(geojson);
   } catch (error) {
+    console.error("Downloaded pipeline GeoJSON validation failed.", {
+      error,
+      geojsonType: geojson?.type ?? null,
+      featureCount: Array.isArray(geojson?.features) ? geojson.features.length : null,
+      downloadUrl,
+      jobId: payload?.summary?.job_id ?? payload?.job_id ?? null,
+    });
+    const overlayFallback = buildFeatureCollectionFromManualOverlay(payload);
+    if (overlayFallback) {
+      return validateFeatureCollection(overlayFallback);
+    }
     if (directGeojsonError) {
       throw directGeojsonError;
     }
     throw error;
+  }
+};
+
+const resolveRawPipelineGeojson = async (payload) => {
+  const downloadUrl = String(payload?.raw_geojson_download_url ?? payload?.geojson_download_url ?? "").trim();
+  if (!downloadUrl) {
+    throw new Error("The pipeline did not return a raw GeoJSON feature collection.");
+  }
+  const response = await fetch(downloadUrl, { method: "GET" });
+  const geojson = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error("The pipeline raw GeoJSON artifact could not be loaded.");
+  }
+  return validateFeatureCollection(geojson);
+};
+
+const assignPredictionRawGeojson = async (payload, selectedNames = []) => {
+  if (!datasetStore.prediction || payload?.summary?.climate_scope !== "regional_manual") {
+    return;
+  }
+  try {
+    const rawGeojson = await resolveRawPipelineGeojson(payload);
+    datasetStore.prediction.rawGeojson = filterPredictionGeojsonToSelectedNames(rawGeojson, selectedNames);
+  } catch (error) {
+    console.error(error);
   }
 };
 
@@ -8175,17 +8307,21 @@ const getManualGridClientInterpolationSubdivisions = (gridCells, backendInterpol
 
 const getManualGridOverlayComputationState = (gridCells) => {
   const predictionGeojson = datasetStore.prediction?.geojson ?? null;
+  const predictionRawGeojson = datasetStore.prediction?.rawGeojson ?? null;
   const predictionSummary = datasetStore.prediction?.summary ?? null;
   if (
     manualGridOverlayComputationCache &&
     manualGridOverlayComputationCache.predictionGeojson === predictionGeojson &&
+    manualGridOverlayComputationCache.predictionRawGeojson === predictionRawGeojson &&
     manualGridOverlayComputationCache.predictionSummary === predictionSummary &&
     manualGridOverlayComputationCache.gridCells === gridCells
   ) {
     return manualGridOverlayComputationCache;
   }
 
-  const predictionFeatures = Array.isArray(predictionGeojson?.features) ? predictionGeojson.features : [];
+  const predictionFeatures = Array.isArray(predictionRawGeojson?.features) && predictionRawGeojson.features.length
+    ? predictionRawGeojson.features
+    : (Array.isArray(predictionGeojson?.features) ? predictionGeojson.features : []);
   const normalizedGridCells = (gridCells ?? []).map(normalizeManualGridCell);
   const backendOverlayBase = getManualGridBackendOverlayBase();
   const featureEntries = predictionFeatures.map((feature) => {
@@ -8253,6 +8389,7 @@ const getManualGridOverlayComputationState = (gridCells) => {
 
   manualGridOverlayComputationCache = {
     predictionGeojson,
+    predictionRawGeojson,
     predictionSummary,
     gridCells,
     normalizedGridCells,
@@ -8342,14 +8479,22 @@ const renderManualGridOverlay = (transform) => {
       const serverOverlayPayload = serverOverlayKey
         ? manualGridServerOverlayCache.get(serverOverlayKey) ?? null
         : null;
-      if (predictionProfileInteractionInProgress && (!serverOverlayKey || !serverOverlayPayload)) {
-        return;
-      }
       if (serverOverlayKey && serverOverlayPayload) {
         activeManualGridServerOverlayKey = serverOverlayKey;
         profileHeatSamples = Array.isArray(serverOverlayPayload?.heat_samples)
           ? serverOverlayPayload.heat_samples.filter((sample) => sample && sample.gridCellId)
           : [];
+      } else if (serverOverlayKey && !predictionProfileInteractionInProgress) {
+        ensureManualGridProfileOverlayForLabels(checkedLabels)
+          .then((overlayPayload) => {
+            if (!overlayPayload) {
+              return;
+            }
+            renderManualGridOverlay(currentTransform);
+          })
+          .catch((error) => {
+            console.error(error);
+          });
       } else if (!predictionProfileInteractionInProgress) {
         activeManualGridServerOverlayKey = "";
       }
@@ -8378,7 +8523,14 @@ const renderManualGridOverlay = (transform) => {
       profileHeatSamples = overlayState.profileHeatSampleLookups.get(lookupKey) ?? [];
     }
   }
-  const hasPredictionValues = (multiProfileMode ? featureLookup.size : predictedLookup.size) > 0 && activeDataViewTab === "prediction";
+  const hasMultiProfileValues = multiProfileMode
+    ? (
+        useCheckedLabels && profileHeatSamples !== null
+          ? profileHeatSamples.length > 0
+          : featureLookup.size > 0
+      )
+    : false;
+  const hasPredictionValues = (multiProfileMode ? hasMultiProfileValues : predictedLookup.size > 0) && activeDataViewTab === "prediction";
   const renderedGridCells = hideManualGridCellsLayer(hasPredictionValues) ? [] : gridCells;
   const path = buildScreenPath(transform);
   const heatSamples = multiProfileMode
@@ -8811,9 +8963,11 @@ const registerDataset = (tab, geojson, sourceName, renderFlowMode, summary = nul
     manualGridServerOverlayCache = new Map();
     activeManualGridServerOverlayKey = "";
     manualGridLastRenderedTransform = d3.zoomIdentity;
+    manualGridServerOverlayRequestKey = "";
   }
   datasetStore[tab] = {
     geojson,
+    rawGeojson: tab === "prediction" ? null : null,
     sourceName,
     renderFlowMode,
     summary,
@@ -9317,6 +9471,7 @@ const handleContinueAfterPreprocess = async () => {
       "saved_model",
       payload.summary ?? null,
     );
+    await assignPredictionRawGeojson(payload, getSelectedPredictionSourceNames());
     await showDatasetInView("prediction", { force: true });
     if (predictionBridgeState?.isAvailable && selectedClimateScope === "default") {
       if (germplasmSelectionPanel) {
@@ -9474,6 +9629,7 @@ const handleExecuteSelectedGermplasm = async () => {
       "saved_model",
       payload.summary ?? null,
     );
+    await assignPredictionRawGeojson(payload, getSelectedPredictionSourceNames());
     await showDatasetInView("prediction", { force: true });
     if (predictionBridgeState?.isAvailable && selectedClimateScope === "default") {
       if (germplasmSelectionPanel) {
@@ -9561,6 +9717,9 @@ const resumePersistedPipelineJob = async () => {
       activeJob?.state === "paused" || activeJob?.pausedPayload ? "saved_model" : "automatic",
       payload.summary ?? null,
     );
+    if (resumedTab === "prediction") {
+      await assignPredictionRawGeojson(payload, getSelectedPredictionSourceNames());
+    }
     await showDatasetInView(resumedTab, { force: true });
     if (
       resumedTab === "prediction" &&

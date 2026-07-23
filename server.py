@@ -135,6 +135,8 @@ PIPELINE_JOBS_LOCK = threading.Lock()
 CE_SUMMARY_JOBS: dict[str, dict[str, object]] = {}
 CE_SUMMARY_JOBS_LOCK = threading.Lock()
 FEATUREHERO_JOBS_FILE = Path.home() / ".featurehero" / "jobs.pids"
+PIPELINE_PROGRESS_CACHE: dict[str, dict[str, object]] = {}
+PIPELINE_SUMMARY_CACHE: dict[str, dict[str, object]] = {}
 DG_HEADER_PATTERN = re.compile(r"^DG\d+$", re.IGNORECASE)
 PIPELINE_FINISHED_JOB_RETENTION_SECONDS = 6 * 60 * 60
 PIPELINE_FAILED_RUN_DIR_RETENTION_SECONDS = 12 * 60 * 60
@@ -149,12 +151,80 @@ def _safe_close_handle(handle: object) -> None:
             close()
 
 
+def _read_json_file_with_cache(
+    path: Path,
+    *,
+    cache: dict[str, dict[str, object]] | None = None,
+    default: dict[str, object] | None = None,
+) -> dict[str, object]:
+    cache_key = str(path.resolve())
+    fallback = dict(default) if isinstance(default, dict) else {}
+    if cache is not None:
+        cached_payload = cache.get(cache_key)
+        if isinstance(cached_payload, dict):
+            fallback = dict(cached_payload)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    if cache is not None:
+        cache[cache_key] = dict(payload)
+    return payload
+
+
+def _recover_pipeline_job_info(job_id: str) -> dict[str, object] | None:
+    run_dir = PIPELINE_RUNS_DIR / job_id
+    if not run_dir.exists() or not run_dir.is_dir():
+        return None
+    input_candidates = sorted(run_dir.glob("*.xlsx"))
+    source_name = input_candidates[0].name if input_candidates else ""
+    return {
+        "run_dir": str(run_dir),
+        "source_name": source_name,
+        "process": None,
+        "stdout_handle": None,
+        "stderr_handle": None,
+        "finished_at": time.time(),
+        "final_status": "",
+    }
+
+
+def _normalize_completed_progress_state(run_dir: Path, progress_payload: dict[str, object]) -> dict[str, object]:
+    normalized = dict(progress_payload) if isinstance(progress_payload, dict) else {}
+    summary_path = run_dir / "summary.json"
+    message = str(normalized.get("message") or "").strip().lower()
+    stage = str(normalized.get("stage") or "").strip().lower()
+    percent_value = normalized.get("percent")
+    try:
+        percent_number = float(percent_value)
+    except (TypeError, ValueError):
+        percent_number = None
+    looks_complete = (
+        summary_path.exists()
+        and (
+            percent_number is not None and percent_number >= 100
+            or "finished successfully" in message
+            or stage == "prediction complete"
+        )
+    )
+    if looks_complete:
+        normalized["status"] = "completed"
+        normalized["percent"] = 100
+        if not str(normalized.get("stage") or "").strip():
+            normalized["stage"] = "Prediction complete"
+        if not str(normalized.get("message") or "").strip():
+            normalized["message"] = "The pipeline finished successfully."
+    return normalized
+
+
 def _write_pipeline_progress_status(run_dir: Path, *, status: str, message: str) -> None:
     progress_file = run_dir / "progress.json"
-    payload: dict[str, object] = {}
-    if progress_file.exists():
-        with contextlib.suppress(OSError, json.JSONDecodeError):
-            payload = json.loads(progress_file.read_text(encoding="utf-8"))
+    payload = _read_json_file_with_cache(
+        progress_file,
+        cache=PIPELINE_PROGRESS_CACHE,
+    ) if progress_file.exists() else {}
     payload.update({
         "status": status,
         "message": message,
@@ -162,6 +232,7 @@ def _write_pipeline_progress_status(run_dir: Path, *, status: str, message: str)
     })
     with contextlib.suppress(OSError):
         progress_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        PIPELINE_PROGRESS_CACHE[str(progress_file.resolve())] = dict(payload)
 
 
 def reap_finished_pipeline_jobs(*, remove_expired: bool = True) -> None:
@@ -185,9 +256,11 @@ def reap_finished_pipeline_jobs(*, remove_expired: bool = True) -> None:
                         progress_file = Path(job.get("run_dir", "")) / "progress.json"
                         progress_status = "completed"
                         if progress_file.exists():
-                            with contextlib.suppress(OSError, json.JSONDecodeError):
-                                progress_payload = json.loads(progress_file.read_text(encoding="utf-8"))
-                                progress_status = str(progress_payload.get("status") or progress_status)
+                            progress_payload = _read_json_file_with_cache(
+                                progress_file,
+                                cache=PIPELINE_PROGRESS_CACHE,
+                            )
+                            progress_status = str(progress_payload.get("status") or progress_status)
                         job["final_status"] = progress_status
                     else:
                         job["final_status"] = "error"
@@ -223,13 +296,67 @@ def cleanup_stale_pipeline_run_dirs() -> None:
         progress_path = run_dir / "progress.json"
         progress_status = ""
         if progress_path.exists():
-            with contextlib.suppress(OSError, json.JSONDecodeError):
-                progress_payload = json.loads(progress_path.read_text(encoding="utf-8"))
-                progress_status = str(progress_payload.get("status") or "").strip()
+            progress_payload = _read_json_file_with_cache(
+                progress_path,
+                cache=PIPELINE_PROGRESS_CACHE,
+            )
+            progress_status = str(progress_payload.get("status") or "").strip()
         should_remove = progress_status in {"error", "cancelled"} or not summary_path.exists()
         if should_remove:
             with contextlib.suppress(OSError):
                 shutil.rmtree(run_dir)
+
+
+def cleanup_previous_pipeline_run_dirs(*, keep_run_dirs: set[Path] | None = None) -> None:
+    if not PIPELINE_RUNS_DIR.exists():
+        return
+    preserved_run_dirs = {
+        path.resolve()
+        for path in (keep_run_dirs or set())
+        if isinstance(path, Path)
+    }
+    with PIPELINE_JOBS_LOCK:
+        preserved_run_dirs.update(
+            Path(str(job.get("run_dir", ""))).resolve()
+            for job in PIPELINE_JOBS.values()
+            if str(job.get("run_dir", "")).strip()
+        )
+    for run_dir in PIPELINE_RUNS_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+        if run_dir.resolve() in preserved_run_dirs:
+            continue
+        with contextlib.suppress(OSError):
+            shutil.rmtree(run_dir)
+
+
+def cleanup_completed_pipeline_run_temporary_artifacts(run_dir: Path) -> None:
+    temporary_files = [
+        run_dir / "input.xlsx",
+        run_dir / "pipeline.stdout.log",
+        run_dir / "pipeline.stderr.log",
+        run_dir / "ce_pipeline_prediction" / "phase03_parallel_debug.log",
+        run_dir / "ce_pipeline_prediction" / "phase03" / "dataInput.csv",
+        run_dir / "ce_pipeline_prediction" / "phase02" / "phase02prediction_log.json",
+    ]
+    for artifact_path in temporary_files:
+        with contextlib.suppress(OSError):
+            artifact_path.unlink(missing_ok=True)
+
+    candidate_dirs = [
+        run_dir / "ce_pipeline_prediction" / "phase03",
+        run_dir / "ce_pipeline_prediction" / "phase02",
+    ]
+    for candidate_dir in candidate_dirs:
+        if not candidate_dir.is_dir():
+            continue
+        try:
+            has_entries = any(candidate_dir.iterdir())
+        except OSError:
+            has_entries = True
+        if not has_entries:
+            with contextlib.suppress(OSError):
+                candidate_dir.rmdir()
 
 
 def get_active_pipeline_job_count() -> int:
@@ -293,6 +420,79 @@ def terminate_pid(pid: int) -> bool:
         return True
     except (ProcessLookupError, PermissionError):
         return False
+
+
+def terminate_existing_pipeline_processes() -> int:
+    cancelled_total = 0
+    pipeline_script = str((APP_DIR / "pipeline" / "run_pipeline.py").resolve())
+
+    reap_finished_pipeline_jobs(remove_expired=False)
+    with PIPELINE_JOBS_LOCK:
+        jobs = list(PIPELINE_JOBS.items())
+    for job_id, job in jobs:
+        process = job.get("process")
+        if process is None:
+            continue
+        try:
+            if process.poll() is not None:
+                continue
+            process.terminate()
+            run_dir = Path(job.get("run_dir", "")) if str(job.get("run_dir", "")).strip() else None
+            if run_dir is not None:
+                _write_pipeline_progress_status(
+                    run_dir,
+                    status="cancelled",
+                    message="The pipeline job was cancelled before starting a new run.",
+                )
+            with PIPELINE_JOBS_LOCK:
+                active_job = PIPELINE_JOBS.get(job_id)
+                if active_job is not None:
+                    active_job["final_status"] = "cancelled"
+                    active_job["finished_at"] = time.time()
+            cancelled_total += 1
+        except Exception:
+            continue
+
+    if os.name == "nt":
+        return cancelled_total
+
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return cancelled_total
+
+    current_pid = os.getpid()
+    known_job_pids: set[int] = set()
+    with PIPELINE_JOBS_LOCK:
+        for job in PIPELINE_JOBS.values():
+            process = job.get("process")
+            if process is None:
+                continue
+            pid = getattr(process, "pid", 0)
+            if isinstance(pid, int) and pid > 0:
+                known_job_pids.add(pid)
+
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            pid_text, command = line.split(None, 1)
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid <= 0 or pid == current_pid or pid in known_job_pids:
+            continue
+        if pipeline_script not in command:
+            continue
+        if terminate_pid(pid):
+            cancelled_total += 1
+    return cancelled_total
 
 
 def get_active_featurehero_jobs() -> dict[str, object]:
@@ -1085,6 +1285,10 @@ def _build_manual_grid_categorical_label(
     return name or str(properties.get("Prediction Profile") or properties.get("Prediction Profile Label") or properties.get("Prediction profile label") or "").strip()
 
 
+def _normalize_prediction_selection_label(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
 def _find_prediction_grid_cell_id(
     feature: dict[str, object],
     grid_cells: list[dict[str, object]],
@@ -1521,9 +1725,9 @@ def _build_manual_grid_profile_overlay_payload(
     multi_germplasm_mode = len([name for name in distinct_names if str(name).strip()]) > 1
     selected_id_header = str(summary.get("selected_id_header") or "").strip()
     selected_lookup = {
-        str(label or "").strip()
+        _normalize_prediction_selection_label(label)
         for label in (selected_labels or [])
-        if str(label or "").strip()
+        if _normalize_prediction_selection_label(label)
     }
     cell_lookup = {
         str(cell.get("grid_cell_id") or "").strip(): cell
@@ -1545,8 +1749,9 @@ def _build_manual_grid_profile_overlay_payload(
             multi_profile_mode=multi_profile_mode,
             multi_germplasm_mode=multi_germplasm_mode,
         )
-        normalized_label = str(label or "").strip()
-        if not normalized_label:
+        display_label = str(label or "").strip()
+        normalized_label = _normalize_prediction_selection_label(display_label)
+        if not display_label:
             continue
         if selected_lookup and normalized_label not in selected_lookup:
             continue
@@ -1560,6 +1765,7 @@ def _build_manual_grid_profile_overlay_payload(
             predicted_value is not None and (current_value is None or predicted_value > current_value)
         ):
             winners_by_cell[grid_cell_id] = {
+                "display_label": display_label,
                 "label": normalized_label,
                 "predicted_value": predicted_value,
             }
@@ -1568,12 +1774,13 @@ def _build_manual_grid_profile_overlay_payload(
         cell = cell_lookup.get(grid_cell_id)
         if cell is None:
             continue
+        display_label = str(winner_payload.get("display_label") or "").strip()
         normalized_label = str(winner_payload.get("label") or "").strip()
-        if not normalized_label:
+        if not normalized_label or not display_label:
             continue
         if normalized_label not in seen_labels:
             seen_labels.add(normalized_label)
-            matched_labels.append(normalized_label)
+            matched_labels.append(display_label)
         heat_samples.append(
             {
                 "id": grid_cell_id,
@@ -1582,7 +1789,7 @@ def _build_manual_grid_profile_overlay_payload(
                 "longitudeMax": _as_float(cell.get("longitude_max")),
                 "latitudeMin": _as_float(cell.get("latitude_min")),
                 "latitudeMax": _as_float(cell.get("latitude_max")),
-                "profileLabel": normalized_label,
+                "profileLabel": display_label,
             }
         )
     return {
@@ -1630,13 +1837,14 @@ def resolve_prediction_feature_collection(summary: dict[str, object]) -> dict[st
 
 def build_prediction_display_feature_collection(summary: dict[str, object]) -> dict[str, object]:
     display_geojson_path = Path(str(summary.get("display_geojson_file", "")).strip()) if summary.get("display_geojson_file") else None
-    if display_geojson_path and display_geojson_path.exists():
+    climate_scope = str(summary.get("climate_scope", "")).strip()
+    if climate_scope != "regional_manual" and display_geojson_path and display_geojson_path.exists():
         with contextlib.suppress(OSError, json.JSONDecodeError):
             payload = json.loads(display_geojson_path.read_text(encoding="utf-8"))
             if is_valid_feature_collection(payload):
                 return payload
     geojson = resolve_prediction_feature_collection(summary)
-    if str(summary.get("climate_scope", "")).strip() != "regional_manual":
+    if climate_scope != "regional_manual":
         return geojson
     compact_geojson, _ = _build_manual_grid_prediction_payload(summary, geojson)
     if is_valid_feature_collection(compact_geojson):
@@ -2395,11 +2603,14 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         selected_id_header: str = "",
     ) -> tuple[str, Path]:
         reap_finished_pipeline_jobs()
+        terminate_existing_pipeline_processes()
+        reap_finished_pipeline_jobs(remove_expired=False)
         cleanup_stale_pipeline_run_dirs()
         PIPELINE_RUNS_DIR.mkdir(parents=True, exist_ok=True)
         run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         run_dir = PIPELINE_RUNS_DIR / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        cleanup_previous_pipeline_run_dirs(keep_run_dirs={run_dir})
         input_file = run_dir / "input.xlsx"
         input_file.write_bytes(file_bytes)
         progress_file = run_dir / "progress.json"
@@ -2779,7 +2990,12 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         if not summary_path.exists():
             raise FileNotFoundError("The pipeline did not produce summary.json.")
 
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary = _read_json_file_with_cache(
+            summary_path,
+            cache=PIPELINE_SUMMARY_CACHE,
+        )
+        if not summary:
+            raise FileNotFoundError("The pipeline summary is not available yet.")
         geojson: dict[str, object] | None = None
         response_summary = build_completed_summary_for_ui(summary)
         if str(summary.get("climate_scope", "")).strip() == "regional_manual":
@@ -2791,6 +3007,8 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             special_surface = _build_manual_grid_special_surface(summary, compact_geojson, distinct_names)
             if special_surface:
                 response_summary["manual_grid_interpolated_surface"] = special_surface
+            if is_valid_feature_collection(compact_geojson):
+                geojson = compact_geojson
         if should_inline_completed_geojson(summary):
             geojson = build_prediction_display_feature_collection(summary)
         response_summary["job_id"] = job_id
@@ -2806,14 +3024,17 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def build_paused_payload(self, job_id: str, run_dir: Path, source_name: str) -> dict[str, object]:
         summary_path = run_dir / "summary.json"
-        summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+        summary = _read_json_file_with_cache(
+            summary_path,
+            cache=PIPELINE_SUMMARY_CACHE,
+        ) if summary_path.exists() else {}
         if not summary.get("preprocess_log"):
             preprocess_summary_file = str(summary.get("preprocess_summary_file", "")).strip()
             if preprocess_summary_file:
                 preprocess_summary_path = Path(preprocess_summary_file)
                 if preprocess_summary_path.exists():
-                    preprocess_summary = json.loads(
-                        preprocess_summary_path.read_text(encoding="utf-8")
+                    preprocess_summary = _read_json_file_with_cache(
+                        preprocess_summary_path,
                     )
                     summary["preprocess_log"] = preprocess_summary.get("preprocess_log", {})
                     if not summary.get("manual_bbox_grid"):
@@ -2839,17 +3060,27 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         with PIPELINE_JOBS_LOCK:
             job = PIPELINE_JOBS.get(job_id)
         if job is None:
-            raise FileNotFoundError("Unknown pipeline job.")
+            recovered_job = _recover_pipeline_job_info(job_id)
+            if recovered_job is None:
+                raise FileNotFoundError("Unknown pipeline job.")
+            job = recovered_job
 
         process = job["process"]
         run_dir = Path(job["run_dir"])
         source_name = str(job["source_name"])
         progress_file = run_dir / "progress.json"
-        progress_payload: dict[str, object] = {}
-        if progress_file.exists():
-            progress_payload = json.loads(progress_file.read_text(encoding="utf-8"))
+        progress_payload = _read_json_file_with_cache(
+            progress_file,
+            cache=PIPELINE_PROGRESS_CACHE,
+        ) if progress_file.exists() else {}
+        progress_payload = _normalize_completed_progress_state(run_dir, progress_payload)
 
+        recovered_without_process = process is None and str(job.get("source_name") or "").strip() != ""
         return_code = process.poll() if process is not None else 0
+        if recovered_without_process:
+            progress_status = str(progress_payload.get("status") or "").strip().lower()
+            if progress_status not in {"completed", "paused", "error", "cancelled"}:
+                return_code = None
         if return_code is not None and process is not None:
             _safe_close_handle(job.get("stdout_handle"))
             _safe_close_handle(job.get("stderr_handle"))
@@ -2868,105 +3099,122 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         }
 
     def handle_process_status(self, job_id: str) -> None:
-        return_code, progress_payload, job_info = self.finalize_job(job_id)
-        run_dir = Path(job_info["run_dir"])
-        source_name = str(job_info["source_name"])
-        with PIPELINE_JOBS_LOCK:
-            job = PIPELINE_JOBS.get(job_id)
-        if return_code is None:
-            running_payload: dict[str, object] = {
-                "job_id": job_id,
-                "status": progress_payload.get("status", "running"),
-                "progress": progress_payload,
-            }
-            if should_skip_running_preprocess_geojson(job):
+        try:
+            return_code, progress_payload, job_info = self.finalize_job(job_id)
+            run_dir = Path(job_info["run_dir"])
+            source_name = str(job_info["source_name"])
+            with PIPELINE_JOBS_LOCK:
+                job = PIPELINE_JOBS.get(job_id)
+            if return_code is None:
+                running_payload: dict[str, object] = {
+                    "job_id": job_id,
+                    "status": progress_payload.get("status", "running"),
+                    "progress": progress_payload,
+                }
+                if should_skip_running_preprocess_geojson(job):
+                    self.send_json(running_payload)
+                    return
+                progress_details = progress_payload.get("details")
+                phase06_xlsx = ""
+                preprocess_summary_file = ""
+                if isinstance(progress_details, dict):
+                    phase06_xlsx = str(progress_details.get("phase06_xlsx", "")).strip()
+                    preprocess_summary_file = str(progress_details.get("preprocess_summary_file", "")).strip()
+                if not phase06_xlsx:
+                    phase06_candidate = run_dir / "preprocess" / "phase06_phase1_compatible" / "phase06_phase1_compatible.xlsx"
+                    if phase06_candidate.exists():
+                        phase06_xlsx = str(phase06_candidate)
+                if not preprocess_summary_file:
+                    preprocess_summary_candidate = run_dir / "preprocess" / "summary.json"
+                    if preprocess_summary_candidate.exists():
+                        preprocess_summary_file = str(preprocess_summary_candidate)
+
+                summary: dict[str, object] = {}
+                if preprocess_summary_file:
+                    preprocess_summary_path = Path(preprocess_summary_file)
+                    if preprocess_summary_path.exists():
+                        summary = _read_json_file_with_cache(preprocess_summary_path)
+                if phase06_xlsx:
+                    summary.setdefault("phase06_xlsx", phase06_xlsx)
+                    phase06_path = Path(phase06_xlsx)
+                    if phase06_path.exists():
+                        try:
+                            running_payload["preprocess_geojson"] = build_original_feature_collection_from_xlsx(phase06_path)
+                            running_payload["summary"] = summary
+                            running_payload["source_name"] = source_name
+                            running_payload["phase06_xlsx"] = phase06_xlsx
+                            running_payload["phase06_download_url"] = f"/api/process-xlsx/artifact/{job_id}/phase06"
+                        except (OSError, ValueError):
+                            pass
                 self.send_json(running_payload)
                 return
-            progress_details = progress_payload.get("details")
-            phase06_xlsx = ""
-            preprocess_summary_file = ""
-            if isinstance(progress_details, dict):
-                phase06_xlsx = str(progress_details.get("phase06_xlsx", "")).strip()
-                preprocess_summary_file = str(progress_details.get("preprocess_summary_file", "")).strip()
-            if not phase06_xlsx:
-                phase06_candidate = run_dir / "preprocess" / "phase06_phase1_compatible" / "phase06_phase1_compatible.xlsx"
-                if phase06_candidate.exists():
-                    phase06_xlsx = str(phase06_candidate)
-            if not preprocess_summary_file:
-                preprocess_summary_candidate = run_dir / "preprocess" / "summary.json"
-                if preprocess_summary_candidate.exists():
-                    preprocess_summary_file = str(preprocess_summary_candidate)
 
-            summary: dict[str, object] = {}
-            if preprocess_summary_file:
-                preprocess_summary_path = Path(preprocess_summary_file)
-                if preprocess_summary_path.exists():
-                    try:
-                        summary = json.loads(preprocess_summary_path.read_text(encoding="utf-8"))
-                    except (OSError, json.JSONDecodeError):
-                        summary = {}
-            if phase06_xlsx:
-                summary.setdefault("phase06_xlsx", phase06_xlsx)
-                phase06_path = Path(phase06_xlsx)
-                if phase06_path.exists():
-                    try:
-                        running_payload["preprocess_geojson"] = build_original_feature_collection_from_xlsx(phase06_path)
-                        running_payload["summary"] = summary
-                        running_payload["source_name"] = source_name
-                        running_payload["phase06_xlsx"] = phase06_xlsx
-                        running_payload["phase06_download_url"] = f"/api/process-xlsx/artifact/{job_id}/phase06"
-                    except (OSError, ValueError):
-                        pass
-            self.send_json(running_payload)
-            return
+            if return_code != 0:
+                stderr_path = run_dir / "pipeline.stderr.log"
+                error_message = "Pipeline execution failed."
+                if stderr_path.exists():
+                    error_text = stderr_path.read_text(encoding="utf-8").strip()
+                    if error_text:
+                        error_message = error_text
+                self.send_json(
+                    {
+                        "job_id": job_id,
+                        "status": "error",
+                        "progress": progress_payload,
+                        "error": error_message,
+                    },
+                    status_code=500,
+                )
+                return
 
-        if return_code != 0:
-            stderr_path = run_dir / "pipeline.stderr.log"
-            error_message = "Pipeline execution failed."
-            if stderr_path.exists():
-                error_text = stderr_path.read_text(encoding="utf-8").strip()
-                if error_text:
-                    error_message = error_text
+            if progress_payload.get("status") == "paused":
+                payload = self.build_paused_payload(job_id, run_dir, source_name)
+                self.send_json(
+                    {
+                        "job_id": job_id,
+                        "status": "paused",
+                        "progress": progress_payload,
+                        **payload,
+                    }
+                )
+                return
+
+            completed_progress = dict(progress_payload) if isinstance(progress_payload, dict) else {}
+            completed_progress["status"] = "completed"
+            completed_progress["percent"] = 100
+            if not str(completed_progress.get("stage") or "").strip():
+                completed_progress["stage"] = "Prediction complete"
+            if not str(completed_progress.get("message") or "").strip():
+                completed_progress["message"] = "The pipeline finished successfully."
+
+            cleanup_completed_pipeline_run_temporary_artifacts(run_dir)
+            payload = self.build_completed_payload(job_id, run_dir, source_name)
             self.send_json(
                 {
                     "job_id": job_id,
-                    "status": "error",
-                    "progress": progress_payload,
-                    "error": error_message,
-                },
-                status_code=500,
-            )
-            return
-
-        if progress_payload.get("status") == "paused":
-            payload = self.build_paused_payload(job_id, run_dir, source_name)
-            self.send_json(
-                {
-                    "job_id": job_id,
-                    "status": "paused",
-                    "progress": progress_payload,
+                    "status": "completed",
+                    "progress": completed_progress,
                     **payload,
                 }
             )
-            return
-
-        completed_progress = dict(progress_payload) if isinstance(progress_payload, dict) else {}
-        completed_progress["status"] = "completed"
-        completed_progress["percent"] = 100
-        if not str(completed_progress.get("stage") or "").strip():
-            completed_progress["stage"] = "Prediction complete"
-        if not str(completed_progress.get("message") or "").strip():
-            completed_progress["message"] = "The pipeline finished successfully."
-
-        payload = self.build_completed_payload(job_id, run_dir, source_name)
-        self.send_json(
-            {
-                "job_id": job_id,
-                "status": "completed",
-                "progress": completed_progress,
-                **payload,
-            }
-        )
+        except Exception as exc:
+            with PIPELINE_JOBS_LOCK:
+                job = PIPELINE_JOBS.get(job_id)
+            run_dir_value = str(job.get("run_dir", "")).strip() if isinstance(job, dict) else ""
+            progress_file = Path(run_dir_value) / "progress.json" if run_dir_value else None
+            progress_payload = _read_json_file_with_cache(
+                progress_file,
+                cache=PIPELINE_PROGRESS_CACHE,
+            ) if progress_file and progress_file.exists() else {}
+            print(f"[status] Falling back to cached pipeline status for {job_id}: {exc!r}", file=sys.stderr, flush=True)
+            self.send_json(
+                {
+                    "job_id": job_id,
+                    "status": progress_payload.get("status", "running"),
+                    "progress": progress_payload,
+                    "warning": "Status payload was recovered after a transient local pipeline read error.",
+                }
+            )
 
     def handle_process_xlsx(self) -> None:
         source_name, file_bytes = self.read_upload_request()
@@ -3012,11 +3260,15 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
                         error_message = error_text
                 raise RuntimeError(error_message)
             progress_file = run_dir / "progress.json"
-            progress_payload = json.loads(progress_file.read_text(encoding="utf-8")) if progress_file.exists() else {}
+            progress_payload = _read_json_file_with_cache(
+                progress_file,
+                cache=PIPELINE_PROGRESS_CACHE,
+            ) if progress_file.exists() else {}
             if progress_payload.get("status") == "paused":
                 payload = self.build_paused_payload(run_id, run_dir, source_name)
                 self.send_json(payload)
                 return
+            cleanup_completed_pipeline_run_temporary_artifacts(run_dir)
             payload = self.build_completed_payload(run_id, run_dir, source_name)
             self.send_json(payload)
             return
@@ -3025,7 +3277,10 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         with PIPELINE_JOBS_LOCK:
             job = PIPELINE_JOBS.get(job_id)
         if job is None:
-            raise FileNotFoundError("Unknown pipeline job.")
+            recovered_job = _recover_pipeline_job_info(job_id)
+            if recovered_job is None:
+                raise FileNotFoundError("Unknown pipeline job.")
+            job = recovered_job
         run_dir = Path(job["run_dir"])
         filename = ""
         if artifact_name == "phase06":
@@ -3037,7 +3292,10 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             summary_path = run_dir / "summary.json"
             if not summary_path.exists():
                 raise FileNotFoundError("The pipeline summary file was not found.")
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary = _read_json_file_with_cache(
+                summary_path,
+                cache=PIPELINE_SUMMARY_CACHE,
+            )
             cell_level_workbook = _build_manual_grid_prediction_workbook_bytes(summary)
             if cell_level_workbook is not None:
                 workbook_bytes, filename = cell_level_workbook
@@ -3059,7 +3317,10 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             summary_path = run_dir / "summary.json"
             if not summary_path.exists():
                 raise FileNotFoundError("The pipeline summary file was not found.")
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary = _read_json_file_with_cache(
+                summary_path,
+                cache=PIPELINE_SUMMARY_CACHE,
+            )
             geojson = resolve_prediction_feature_collection(summary)
             filename = "pipeline_output.geojson"
             body = json.dumps(geojson, ensure_ascii=False, indent=2).encode("utf-8")
@@ -3077,7 +3338,10 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             summary_path = run_dir / "summary.json"
             if not summary_path.exists():
                 raise FileNotFoundError("The pipeline summary file was not found.")
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary = _read_json_file_with_cache(
+                summary_path,
+                cache=PIPELINE_SUMMARY_CACHE,
+            )
             geojson = build_prediction_display_feature_collection(summary)
             filename = "pipeline_display_output.geojson"
             body = json.dumps(geojson, ensure_ascii=False, indent=2).encode("utf-8")

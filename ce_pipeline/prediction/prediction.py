@@ -847,16 +847,7 @@ def _should_preserve_manual_grid_prediction_rows(
     selected_id_header: str,
     selected_germplasm_names: list[str] | None,
 ) -> bool:
-    if str(climate_scope or "").strip() != "regional_manual":
-        return False
-    if str(selected_id_header or "").strip():
-        return False
-    distinct_names = {
-        str(name or "").strip()
-        for name in (selected_germplasm_names or [])
-        if str(name or "").strip()
-    }
-    return len(distinct_names) == 1
+    return False
 
 
 def _aggregate_prediction_dataframe_by_selected_id(
@@ -992,10 +983,7 @@ def _should_use_manual_grid_dataframe_finalization(
     climate_scope: str,
     selected_id_header: str,
 ) -> bool:
-    return (
-        str(climate_scope or "").strip() == "regional_manual"
-        and bool(str(selected_id_header or "").strip())
-    )
+    return str(climate_scope or "").strip() == "regional_manual"
 
 
 def _build_lightweight_manual_grid_geojson_dataframe(
