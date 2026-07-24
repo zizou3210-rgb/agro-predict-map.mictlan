@@ -357,7 +357,16 @@ def _build_worker_progress_summary(worker_snapshot: dict[str, object]) -> str:
     if current_date:
         summary += f", climate date {current_date}"
     if current_dataset and current_dataset not in {"", "daily_raster_plan_resolved"}:
-        summary += f", dataset {current_dataset}"
+        dataset_display = current_dataset
+        if current_dataset.endswith("_lock_wait"):
+            dataset_display = f"{current_dataset.removesuffix('_lock_wait')} lock wait"
+        elif current_dataset.endswith("_lock_acquired"):
+            dataset_display = f"{current_dataset.removesuffix('_lock_acquired')} lock acquired"
+        elif current_dataset.endswith("_download"):
+            dataset_display = f"{current_dataset.removesuffix('_download')} download"
+        elif current_dataset == "resolve_daily_raster_paths":
+            dataset_display = "resolving raster paths"
+        summary += f", dataset {dataset_display}"
     if current_raster_path:
         raster_name = Path(current_raster_path.split("|", 1)[0]).name
         if raster_name and raster_name != current_raster_path:
@@ -893,6 +902,10 @@ def _download_with_retries(url: str, target_path: Path) -> None:
 def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> tuple[Path, bool]:
     target_path, url = _resolve_raster_request(dataset, current_date, cache_dir)
     if target_path.exists() and not _is_invalid_raster_path(target_path):
+        set_thread_climate_debug_context(
+            current_dataset=dataset,
+            current_raster_path=str(target_path),
+        )
         append_thread_climate_debug_log(
             "raster_path_resolved",
             {
@@ -904,6 +917,10 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
             },
         )
         return target_path, False
+    set_thread_climate_debug_context(
+        current_dataset=f"{dataset}_lock_wait",
+        current_raster_path=str(target_path),
+    )
     lock = _get_raster_download_lock(target_path)
     lock_wait_started_at = time.monotonic()
     append_thread_climate_debug_log(
@@ -915,6 +932,10 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
         },
     )
     with lock:
+        set_thread_climate_debug_context(
+            current_dataset=f"{dataset}_lock_acquired",
+            current_raster_path=str(target_path),
+        )
         lock_wait_seconds = round(max(0.0, time.monotonic() - lock_wait_started_at), 3)
         append_thread_climate_debug_log(
             "raster_lock_acquired",
@@ -950,6 +971,10 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
             },
         )
         if not target_exists:
+            set_thread_climate_debug_context(
+                current_dataset=f"{dataset}_download",
+                current_raster_path=str(target_path),
+            )
             append_thread_climate_debug_log(
                 "raster_download_started",
                 {
@@ -971,6 +996,10 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
                     "download_seconds": round(max(0.0, time.monotonic() - download_started_at), 3),
                 },
             )
+        set_thread_climate_debug_context(
+            current_dataset=dataset,
+            current_raster_path=str(target_path),
+        )
         _clear_invalid_raster_path(target_path)
     append_thread_climate_debug_log(
         "raster_path_resolved",
