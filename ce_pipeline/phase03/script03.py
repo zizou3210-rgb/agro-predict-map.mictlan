@@ -57,6 +57,7 @@ from shared_cache import (
     get_nasa_cache_entry,
     get_nasa_cache_entries,
     load_climate_feature_cache as load_shared_climate_feature_cache,
+    resolve_shared_cache_db_path,
     save_climate_feature_cache as save_shared_climate_feature_cache,
     upsert_climate_feature_cache_entries,
     upsert_nasa_cache_entries,
@@ -2059,6 +2060,12 @@ def precompute_chc_series_batches(
                     )
 
             if unresolved_cache_keys:
+                set_thread_climate_debug_context(
+                    current_dataset="shared_cache_lookup",
+                    current_raster_path=str(resolve_shared_cache_db_path()),
+                    total_days=len(unresolved_cache_keys),
+                    processed_days=0,
+                )
                 append_phase03_debug_log(
                     get_thread_climate_debug_file() or debug_file,
                     "precompute_shared_cache_lookup_started",
@@ -2070,6 +2077,12 @@ def precompute_chc_series_batches(
                 shared_cached_entries = get_nasa_cache_entries(
                     unresolved_cache_keys,
                     touch_access=False,
+                )
+                set_thread_climate_debug_context(
+                    current_dataset="shared_cache_lookup_completed",
+                    current_raster_path=str(resolve_shared_cache_db_path()),
+                    total_days=len(unresolved_cache_keys),
+                    processed_days=len(shared_cached_entries),
                 )
                 append_phase03_debug_log(
                     get_thread_climate_debug_file() or debug_file,
@@ -2120,6 +2133,8 @@ def precompute_chc_series_batches(
                 union_start=union_start.isoformat(),
                 union_end=union_end.isoformat(),
                 missing_ranges=len(missing_ranges),
+                total_days=max((union_end - union_start).days + 1, 1),
+                processed_days=0,
             )
             append_phase03_debug_log(
                 get_thread_climate_debug_file() or debug_file,
@@ -2242,15 +2257,35 @@ def precompute_chc_series_batches(
                         }
                         for payload in pending_payloads[:5]
                     ]
+                    active_worker_sample = get_active_climate_worker_snapshots()[: min(worker_count, 5)]
+                    update_parallel_progress_diagnostics(
+                        climate_pending_series_count=len(pending_futures),
+                        climate_oldest_pending_seconds=pending_sample[0]["pending_seconds"] if pending_sample else 0,
+                        climate_pending_series_sample=[
+                            {
+                                "series": (
+                                    f"{str(payload.get('pixel_id') or '')}"
+                                    f" ({int(payload.get('series_count', 0) or 0)} series)"
+                                ).strip(),
+                                "pending_seconds": round(
+                                    max(0.0, now - float(payload.get("submitted_at", now) or now)),
+                                    1,
+                                ),
+                            }
+                            for payload in pending_payloads[:5]
+                        ],
+                        climate_active_worker_sample=active_worker_sample,
+                    )
                     append_phase03_debug_log(
                         debug_file,
                         "precompute_heartbeat",
                         {
                             "pending_pixel_groups": len(pending_futures),
                             "pending_pixel_sample": pending_sample,
-                            "active_worker_sample": get_active_climate_worker_snapshots()[: min(worker_count, 5)],
+                            "active_worker_sample": active_worker_sample,
                         },
                     )
+                    report_parallel_series_progress("__precompute_heartbeat__", 0, 1, completed=False, force=True)
                     last_heartbeat_at = now
                 continue
             last_heartbeat_at = time.monotonic()
