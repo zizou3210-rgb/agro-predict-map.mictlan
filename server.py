@@ -1878,7 +1878,6 @@ def build_prediction_display_feature_collection(summary: dict[str, object]) -> d
 def build_completed_summary_for_ui(summary: dict[str, object]) -> dict[str, object]:
     response_summary = dict(summary)
     response_summary.pop("preprocess_log", None)
-    response_summary.pop("manual_bbox_grid", None)
     return response_summary
 
 
@@ -3324,7 +3323,12 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             geojson = resolve_prediction_feature_collection(summary)
             filename = "pipeline_output.geojson"
-            body = json.dumps(geojson, ensure_ascii=False, indent=2).encode("utf-8")
+            body = json.dumps(
+                sanitize_json_payload(geojson),
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/geo+json")
             self.send_header(
@@ -3345,7 +3349,12 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             geojson = build_prediction_display_feature_collection(summary)
             filename = "pipeline_display_output.geojson"
-            body = json.dumps(geojson, ensure_ascii=False, indent=2).encode("utf-8")
+            body = json.dumps(
+                sanitize_json_payload(geojson),
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/geo+json")
             self.send_header(
