@@ -36,13 +36,17 @@ try:
     import certifi
 except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
     certifi = None
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 try:
     import rasterio
     from rasterio.windows import Window
 except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
     rasterio = None
     Window = None
+try:
+    from rasterio.errors import RasterioIOError
+except (ModuleNotFoundError, ImportError):  # pragma: no cover - optional runtime dependency
+    RasterioIOError = OSError
 
 from config_env import resolve_runtime_root
 from preprocess import ea_pipeline, soil_enrichment
@@ -53,6 +57,7 @@ from shared_cache import (
     get_nasa_cache_entry,
     get_nasa_cache_entries,
     load_climate_feature_cache as load_shared_climate_feature_cache,
+    resolve_shared_cache_db_path,
     save_climate_feature_cache as save_shared_climate_feature_cache,
     upsert_climate_feature_cache_entries,
     upsert_nasa_cache_entries,
@@ -194,6 +199,8 @@ _CHC_SERIES_AGGREGATION_CACHE: dict[int, dict[str, object]] = {}
 _CHC_WINDOW_METRICS_CACHE: dict[tuple[int, str, str], dict[str, float | None]] = {}
 _CHC_PIXEL_DAILY_SAMPLE_CACHE: dict[tuple[str, str, str], float | None] = {}
 _CHC_PREPARED_RASTER_PATHS: dict[tuple[str, str], Path] = {}
+_INVALID_RASTER_PATHS_LOCK = Lock()
+_INVALID_RASTER_PATHS: set[Path] = set()
 _CHC_PARALLEL_PROGRESS_MODE = False
 _CHC_PARALLEL_PROGRESS_LOCK = Lock()
 _CHC_DEBUG_LOCK = Lock()
@@ -329,12 +336,42 @@ def get_active_climate_worker_snapshots() -> list[dict[str, object]]:
 def _build_worker_progress_summary(worker_snapshot: dict[str, object]) -> str:
     series = str(worker_snapshot.get("series") or worker_snapshot.get("worker_label") or "unknown series").strip()
     current_date = str(worker_snapshot.get("current_date") or "").strip()
+    current_dataset = str(worker_snapshot.get("current_dataset") or "").strip()
+    current_raster_path = str(worker_snapshot.get("current_raster_path") or "").strip()
     processed_days = int(worker_snapshot.get("processed_days", 0) or 0)
     total_days = int(worker_snapshot.get("total_days", 0) or 0)
     active_seconds = round(float(worker_snapshot.get("active_seconds", 0.0) or 0.0), 1)
-    summary = f"{series}: {processed_days}/{max(total_days, 1)} days"
+    estimated_union_fraction = _estimate_worker_union_fraction(worker_snapshot)
+    estimated_resolved_days = min(
+        max(int(round(estimated_union_fraction * max(total_days, 1))), processed_days),
+        max(total_days, 1),
+    )
+    if processed_days > 0:
+        summary = f"{series}: {processed_days}/{max(total_days, 1)} days"
+    elif current_date:
+        summary = (
+            f"{series}: resolved through {current_date} "
+            f"({estimated_resolved_days}/{max(total_days, 1)} days est.)"
+        )
+    else:
+        summary = f"{series}: {processed_days}/{max(total_days, 1)} days"
     if current_date:
         summary += f", climate date {current_date}"
+    if current_dataset and current_dataset not in {"", "daily_raster_plan_resolved"}:
+        dataset_display = current_dataset
+        if current_dataset.endswith("_lock_wait"):
+            dataset_display = f"{current_dataset.removesuffix('_lock_wait')} lock wait"
+        elif current_dataset.endswith("_lock_acquired"):
+            dataset_display = f"{current_dataset.removesuffix('_lock_acquired')} lock acquired"
+        elif current_dataset.endswith("_download"):
+            dataset_display = f"{current_dataset.removesuffix('_download')} download"
+        elif current_dataset == "resolve_daily_raster_paths":
+            dataset_display = "resolving raster paths"
+        summary += f", dataset {dataset_display}"
+    if current_raster_path:
+        raster_name = Path(current_raster_path.split("|", 1)[0]).name
+        if raster_name and raster_name != current_raster_path:
+            summary += f", raster {raster_name}"
     summary += f", active {active_seconds}s"
     return summary
 
@@ -344,11 +381,41 @@ def _build_worker_union_progress(worker_snapshot: dict[str, object] | None) -> s
         return ""
     processed_days = int(worker_snapshot.get("processed_days", 0) or 0)
     total_days = max(int(worker_snapshot.get("total_days", 0) or 0), 1)
-    union_fraction = min(max(processed_days / total_days, 0.0), 1.0)
+    if processed_days > 0:
+        union_fraction = min(max(processed_days / total_days, 0.0), 1.0)
+        union_days = processed_days
+    else:
+        union_fraction = _estimate_worker_union_fraction(worker_snapshot)
+        union_days = min(max(int(round(union_fraction * total_days)), 0), total_days)
     return (
-        f"Union scan {processed_days}/{total_days} days "
+        f"Union scan {union_days}/{total_days} days "
         f"({union_fraction * 100:.1f}%)."
     )
+
+
+def _estimate_worker_union_fraction(worker_snapshot: dict[str, object] | None) -> float:
+    if not isinstance(worker_snapshot, dict):
+        return 0.0
+    processed_days = int(worker_snapshot.get("processed_days", 0) or 0)
+    total_days = max(int(worker_snapshot.get("total_days", 0) or 0), 1)
+    if processed_days > 0:
+        return min(max(processed_days / total_days, 0.0), 1.0)
+    current_date_text = str(worker_snapshot.get("current_date") or "").strip()
+    union_start_text = str(worker_snapshot.get("union_start") or "").strip()
+    union_end_text = str(worker_snapshot.get("union_end") or "").strip()
+    if not current_date_text or not union_start_text or not union_end_text:
+        return 0.0
+    try:
+        current_date_value = date.fromisoformat(current_date_text)
+        union_start_value = date.fromisoformat(union_start_text)
+        union_end_value = date.fromisoformat(union_end_text)
+    except ValueError:
+        return 0.0
+    if union_end_value < union_start_value:
+        return 0.0
+    traversed_days = max((min(current_date_value, union_end_value) - union_start_value).days + 1, 0)
+    union_total_days = max((union_end_value - union_start_value).days + 1, 1)
+    return min(max(traversed_days / union_total_days, 0.0), 1.0)
 
 
 def _select_primary_active_worker(active_worker_sample: list[dict[str, object]]) -> dict[str, object] | None:
@@ -626,6 +693,87 @@ def _resolve_raster_request(dataset: str, current_date: date, cache_dir: Path) -
     return dataset_dir / filename, url
 
 
+def _mark_invalid_raster_path(path: Path) -> None:
+    with _INVALID_RASTER_PATHS_LOCK:
+        _INVALID_RASTER_PATHS.add(path.resolve())
+
+
+def _clear_invalid_raster_path(path: Path) -> None:
+    with _INVALID_RASTER_PATHS_LOCK:
+        _INVALID_RASTER_PATHS.discard(path.resolve())
+
+
+def _is_invalid_raster_path(path: Path) -> bool:
+    with _INVALID_RASTER_PATHS_LOCK:
+        return path.resolve() in _INVALID_RASTER_PATHS
+
+
+def _drop_raster_runtime_caches_for_path(path: Path) -> None:
+    resolved_path = path.resolve()
+    cache = _get_thread_raster_image_cache()
+    entry = cache.pop(resolved_path, None)
+    if isinstance(entry, dict):
+        image = entry.get("image")
+        if isinstance(image, Image.Image):
+            image.close()
+        dataset = entry.get("dataset")
+        if dataset is not None and hasattr(dataset, "close"):
+            dataset.close()
+    with _RASTER_METADATA_LOCK:
+        _RASTER_METADATA_CACHE.pop(resolved_path, None)
+    with _RASTER_PIXEL_INDEX_CACHE_LOCK:
+        stale_keys = [key for key in _RASTER_PIXEL_INDEX_CACHE if len(key) >= 2]
+        if stale_keys:
+            _RASTER_PIXEL_INDEX_CACHE.clear()
+
+
+def _should_retry_invalid_raster(exc: Exception) -> bool:
+    if isinstance(exc, (UnidentifiedImageError, RasterioIOError, OSError)):
+        return True
+    if isinstance(exc, RuntimeError):
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "missing geotiff metadata",
+                "missing rasterio metadata",
+                "could not access climate raster",
+                "could not access rasterio dataset",
+                "could not access climate raster pixels",
+            )
+        )
+    return False
+
+
+def _invalidate_and_remove_raster(path: Path, *, dataset: str, current_date: date, reason: Exception) -> None:
+    resolved_path = path.resolve()
+    _mark_invalid_raster_path(resolved_path)
+    _drop_raster_runtime_caches_for_path(resolved_path)
+    append_thread_climate_debug_log(
+        "raster_invalidated",
+        {
+            "dataset": dataset,
+            "target_date": current_date.isoformat(),
+            "target_path": str(resolved_path),
+            "error_type": type(reason).__name__,
+            "error": str(reason),
+        },
+    )
+    try:
+        resolved_path.unlink(missing_ok=True)
+    except OSError as unlink_error:
+        append_thread_climate_debug_log(
+            "raster_invalidation_unlink_failed",
+            {
+                "dataset": dataset,
+                "target_date": current_date.isoformat(),
+                "target_path": str(resolved_path),
+                "error_type": type(unlink_error).__name__,
+                "error": str(unlink_error),
+            },
+        )
+
+
 def _build_ssl_context() -> ssl.SSLContext:
     if certifi is not None:
         return ssl.create_default_context(cafile=certifi.where())
@@ -754,7 +902,11 @@ def _download_with_retries(url: str, target_path: Path) -> None:
 
 def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> tuple[Path, bool]:
     target_path, url = _resolve_raster_request(dataset, current_date, cache_dir)
-    if target_path.exists():
+    if target_path.exists() and not _is_invalid_raster_path(target_path):
+        set_thread_climate_debug_context(
+            current_dataset=dataset,
+            current_raster_path=str(target_path),
+        )
         append_thread_climate_debug_log(
             "raster_path_resolved",
             {
@@ -766,6 +918,10 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
             },
         )
         return target_path, False
+    set_thread_climate_debug_context(
+        current_dataset=f"{dataset}_lock_wait",
+        current_raster_path=str(target_path),
+    )
     lock = _get_raster_download_lock(target_path)
     lock_wait_started_at = time.monotonic()
     append_thread_climate_debug_log(
@@ -777,6 +933,10 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
         },
     )
     with lock:
+        set_thread_climate_debug_context(
+            current_dataset=f"{dataset}_lock_acquired",
+            current_raster_path=str(target_path),
+        )
         lock_wait_seconds = round(max(0.0, time.monotonic() - lock_wait_started_at), 3)
         append_thread_climate_debug_log(
             "raster_lock_acquired",
@@ -788,6 +948,19 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
             },
         )
         downloaded = False
+        if _is_invalid_raster_path(target_path) and target_path.exists():
+            append_thread_climate_debug_log(
+                "raster_path_forced_refresh",
+                {
+                    "dataset": dataset,
+                    "target_date": current_date.isoformat(),
+                    "target_path": str(target_path),
+                },
+            )
+            try:
+                target_path.unlink()
+            except FileNotFoundError:
+                pass
         target_exists = target_path.exists()
         append_thread_climate_debug_log(
             "raster_path_checked",
@@ -799,6 +972,10 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
             },
         )
         if not target_exists:
+            set_thread_climate_debug_context(
+                current_dataset=f"{dataset}_download",
+                current_raster_path=str(target_path),
+            )
             append_thread_climate_debug_log(
                 "raster_download_started",
                 {
@@ -820,6 +997,11 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
                     "download_seconds": round(max(0.0, time.monotonic() - download_started_at), 3),
                 },
             )
+        set_thread_climate_debug_context(
+            current_dataset=dataset,
+            current_raster_path=str(target_path),
+        )
+        _clear_invalid_raster_path(target_path)
     append_thread_climate_debug_log(
         "raster_path_resolved",
         {
@@ -1064,16 +1246,58 @@ def _sample_chc_dataset_value(
             "raster_path": str(path),
         },
     )
-    value = _sample_raster_value(
-        path,
-        dataset=dataset,
-        pixel_id=pixel_id,
-        latitude=latitude,
-        longitude=longitude,
-        fill_value=fill_value,
-        latitude_min=latitude_min,
-        latitude_max=latitude_max,
-    )
+    try:
+        value = _sample_raster_value(
+            path,
+            dataset=dataset,
+            pixel_id=pixel_id,
+            latitude=latitude,
+            longitude=longitude,
+            fill_value=fill_value,
+            latitude_min=latitude_min,
+            latitude_max=latitude_max,
+        )
+    except Exception as exc:
+        if not _should_retry_invalid_raster(exc):
+            raise
+        append_phase03_debug_log(
+            get_thread_climate_debug_file(),
+            "serial_series_dataset_sample_retry_invalid_raster",
+            {
+                **get_thread_climate_debug_context(),
+                "dataset": dataset,
+                "raster_path": str(path),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        _invalidate_and_remove_raster(path, dataset=dataset, current_date=current_date, reason=exc)
+        refreshed_path, refreshed_downloaded = _resolve_raster_path(
+            dataset,
+            current_date,
+            resolve_shared_chc_cache_dir(),
+        )
+        set_thread_climate_debug_context(current_raster_path=str(refreshed_path))
+        append_phase03_debug_log(
+            get_thread_climate_debug_file(),
+            "serial_series_dataset_sample_retry_resolved",
+            {
+                **get_thread_climate_debug_context(),
+                "dataset": dataset,
+                "raster_path": str(refreshed_path),
+                "downloaded": refreshed_downloaded,
+            },
+        )
+        value = _sample_raster_value(
+            refreshed_path,
+            dataset=dataset,
+            pixel_id=pixel_id,
+            latitude=latitude,
+            longitude=longitude,
+            fill_value=fill_value,
+            latitude_min=latitude_min,
+            latitude_max=latitude_max,
+        )
     with _CHC_PIXEL_DAILY_SAMPLE_CACHE_LOCK:
         _CHC_PIXEL_DAILY_SAMPLE_CACHE[cache_key] = value
     append_phase03_debug_log(
@@ -1474,6 +1698,18 @@ def _resolve_daily_raster_paths(
     cache_dir: Path,
 ) -> tuple[dict[str, Path], dict[str, bool]]:
     if _CHC_PREPARED_RASTER_PATHS:
+        set_thread_climate_debug_context(
+            current_date=current_date.isoformat(),
+            current_dataset="prepared_raster_paths",
+            current_raster_path=str(cache_dir),
+        )
+        append_thread_climate_debug_log(
+            "resolve_daily_raster_paths_prepared_started",
+            {
+                "target_date": current_date.isoformat(),
+                "prepared_entries": len(_CHC_PREPARED_RASTER_PATHS),
+            },
+        )
         return (
             {
                 "chirps": _resolve_prepared_raster_path("chirps", current_date, cache_dir),
@@ -1487,9 +1723,34 @@ def _resolve_daily_raster_paths(
             },
         )
 
+    set_thread_climate_debug_context(
+        current_date=current_date.isoformat(),
+        current_dataset="chirps",
+        current_raster_path=str(cache_dir),
+    )
     chirps_path, chirps_downloaded = _resolve_raster_path("chirps", current_date, cache_dir)
+    set_thread_climate_debug_context(
+        current_dataset="chirts_tmax",
+        current_raster_path=str(chirps_path),
+    )
     tmax_path, tmax_downloaded = _resolve_raster_path("chirts_tmax", current_date, cache_dir)
+    set_thread_climate_debug_context(
+        current_dataset="chirts_tmin",
+        current_raster_path=str(tmax_path),
+    )
     tmin_path, tmin_downloaded = _resolve_raster_path("chirts_tmin", current_date, cache_dir)
+    append_thread_climate_debug_log(
+        "resolve_daily_raster_paths_completed",
+        {
+            "target_date": current_date.isoformat(),
+            "chirps_path": str(chirps_path),
+            "chirps_downloaded": chirps_downloaded,
+            "chirts_tmax_path": str(tmax_path),
+            "chirts_tmax_downloaded": tmax_downloaded,
+            "chirts_tmin_path": str(tmin_path),
+            "chirts_tmin_downloaded": tmin_downloaded,
+        },
+    )
     return (
         {
             "chirps": chirps_path,
@@ -1513,7 +1774,38 @@ def _build_daily_raster_plan(
     daily_plan: list[tuple[date, dict[str, Path]]] = []
     current_date = start_date
     while current_date <= end_date:
+        set_thread_climate_debug_context(
+            current_date=current_date.isoformat(),
+            current_dataset="resolve_daily_raster_paths",
+            current_raster_path=str(cache_dir),
+        )
+        append_thread_climate_debug_log(
+            "daily_raster_plan_day_resolve_started",
+            {
+                "target_date": current_date.isoformat(),
+                "cache_dir": str(cache_dir),
+            },
+        )
         raster_paths, _download_flags = _resolve_daily_raster_paths(current_date, cache_dir)
+        set_thread_climate_debug_context(
+            current_dataset="daily_raster_plan_resolved",
+            current_raster_path="|".join(
+                [
+                    str(raster_paths["chirps"]),
+                    str(raster_paths["chirts_tmax"]),
+                    str(raster_paths["chirts_tmin"]),
+                ]
+            ),
+        )
+        append_thread_climate_debug_log(
+            "daily_raster_plan_day_resolve_completed",
+            {
+                "target_date": current_date.isoformat(),
+                "chirps_path": str(raster_paths["chirps"]),
+                "chirts_tmax_path": str(raster_paths["chirts_tmax"]),
+                "chirts_tmin_path": str(raster_paths["chirts_tmin"]),
+            },
+        )
         daily_plan.append((current_date, raster_paths))
         current_date += timedelta(days=1)
     return daily_plan
@@ -1768,6 +2060,12 @@ def precompute_chc_series_batches(
                     )
 
             if unresolved_cache_keys:
+                set_thread_climate_debug_context(
+                    current_dataset="shared_cache_lookup",
+                    current_raster_path=str(resolve_shared_cache_db_path()),
+                    total_days=len(unresolved_cache_keys),
+                    processed_days=0,
+                )
                 append_phase03_debug_log(
                     get_thread_climate_debug_file() or debug_file,
                     "precompute_shared_cache_lookup_started",
@@ -1779,6 +2077,12 @@ def precompute_chc_series_batches(
                 shared_cached_entries = get_nasa_cache_entries(
                     unresolved_cache_keys,
                     touch_access=False,
+                )
+                set_thread_climate_debug_context(
+                    current_dataset="shared_cache_lookup_completed",
+                    current_raster_path=str(resolve_shared_cache_db_path()),
+                    total_days=len(unresolved_cache_keys),
+                    processed_days=len(shared_cached_entries),
                 )
                 append_phase03_debug_log(
                     get_thread_climate_debug_file() or debug_file,
@@ -1829,6 +2133,8 @@ def precompute_chc_series_batches(
                 union_start=union_start.isoformat(),
                 union_end=union_end.isoformat(),
                 missing_ranges=len(missing_ranges),
+                total_days=max((union_end - union_start).days + 1, 1),
+                processed_days=0,
             )
             append_phase03_debug_log(
                 get_thread_climate_debug_file() or debug_file,
@@ -1951,15 +2257,35 @@ def precompute_chc_series_batches(
                         }
                         for payload in pending_payloads[:5]
                     ]
+                    active_worker_sample = get_active_climate_worker_snapshots()[: min(worker_count, 5)]
+                    update_parallel_progress_diagnostics(
+                        climate_pending_series_count=len(pending_futures),
+                        climate_oldest_pending_seconds=pending_sample[0]["pending_seconds"] if pending_sample else 0,
+                        climate_pending_series_sample=[
+                            {
+                                "series": (
+                                    f"{str(payload.get('pixel_id') or '')}"
+                                    f" ({int(payload.get('series_count', 0) or 0)} series)"
+                                ).strip(),
+                                "pending_seconds": round(
+                                    max(0.0, now - float(payload.get("submitted_at", now) or now)),
+                                    1,
+                                ),
+                            }
+                            for payload in pending_payloads[:5]
+                        ],
+                        climate_active_worker_sample=active_worker_sample,
+                    )
                     append_phase03_debug_log(
                         debug_file,
                         "precompute_heartbeat",
                         {
                             "pending_pixel_groups": len(pending_futures),
                             "pending_pixel_sample": pending_sample,
-                            "active_worker_sample": get_active_climate_worker_snapshots()[: min(worker_count, 5)],
+                            "active_worker_sample": active_worker_sample,
                         },
                     )
+                    report_parallel_series_progress("__precompute_heartbeat__", 0, 1, completed=False, force=True)
                     last_heartbeat_at = now
                 continue
             last_heartbeat_at = time.monotonic()
@@ -2366,6 +2692,15 @@ def report_parallel_series_progress(
     primary_worker_summary = _build_worker_progress_summary(primary_worker) if isinstance(primary_worker, dict) else ""
     primary_union_progress = _build_worker_union_progress(primary_worker)
     active_workers = len(active_worker_sample) if active_worker_sample else min(max(effective_series_total - completed_series, 0), worker_count)
+    estimated_visible_fraction_sum = 0.0
+    for worker_snapshot in active_worker_sample:
+        estimated_visible_fraction_sum += _estimate_worker_union_fraction(worker_snapshot)
+    estimated_overall_fraction = min(
+        max(estimated_visible_fraction_sum, 0.0) / max(effective_series_total, 1),
+        1.0,
+    )
+    effective_overall_fraction = max(overall_fraction, estimated_overall_fraction)
+
     details_payload = {
         "phase": "phase03",
         "climate_progress_stage": "compute",
@@ -2377,17 +2712,18 @@ def report_parallel_series_progress(
         "climate_active_worker_sample": active_worker_sample,
         "climate_primary_worker_summary": primary_worker_summary,
         "climate_primary_union_progress": primary_union_progress,
+        "climate_estimated_progress_fraction": estimated_overall_fraction,
         **(diagnostics if isinstance(diagnostics, dict) else {}),
     }
 
-    overall_percent = round(33 + (overall_fraction * 17), 1) if overall_fraction > 0 else 33.0
+    overall_percent = round(33 + (effective_overall_fraction * 17), 1) if effective_overall_fraction > 0 else 33.0
     if completed:
         message = (
             f"Computing climate windows from prepared rasters: completed {completed_series}/{effective_series_total} climate series. "
             f"{active_workers} worker{'s' if active_workers != 1 else ''} still active. "
             f"Current lead worker: {primary_worker_summary or 'waiting for worker detail'}. "
             f"{primary_union_progress} "
-            f"Phase03 climate workload progress {overall_fraction * 100:.1f}%."
+            f"Phase03 climate workload progress {effective_overall_fraction * 100:.1f}%."
         )
     else:
         message = (
@@ -2396,7 +2732,7 @@ def report_parallel_series_progress(
             f"{active_workers} worker{'s' if active_workers != 1 else ''} active. "
             f"Current lead worker: {primary_worker_summary or 'waiting for worker detail'}. "
             f"{primary_union_progress} "
-            f"Phase03 climate workload progress {overall_fraction * 100:.1f}%."
+            f"Phase03 climate workload progress {effective_overall_fraction * 100:.1f}%."
         )
 
     write_progress(
