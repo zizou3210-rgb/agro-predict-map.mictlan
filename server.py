@@ -91,7 +91,7 @@ CE_PHASE06_SCRIPT = CE_PIPELINE_DIR / "phase06" / "phase06.py"
 TOP_GERMPLASM_ENABLED = False
 APP_RUNTIME_NAME = "MictlanAgriXGBoost"
 FEATUREHERO_DIR = APP_DIR / "resources" / "featurehero"
-PIPELINE_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL")
+PIPELINE_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL", "rasterio")
 
 def get_preferred_pipeline_pythons() -> list[Path | None]:
     featurehero_venv = APP_DIR / "resources" / "featurehero" / ".venv"
@@ -1878,7 +1878,6 @@ def build_prediction_display_feature_collection(summary: dict[str, object]) -> d
 def build_completed_summary_for_ui(summary: dict[str, object]) -> dict[str, object]:
     response_summary = dict(summary)
     response_summary.pop("preprocess_log", None)
-    response_summary.pop("manual_bbox_grid", None)
     return response_summary
 
 
@@ -1911,9 +1910,10 @@ def find_free_port() -> int:
 
 
 def get_missing_pipeline_modules(python_exec: Path) -> list[str]:
+    module_list = ",".join(repr(name) for name in PIPELINE_RUNTIME_MODULES)
     probe = (
         "import importlib.util, json; "
-        "mods=['featurehero','openpyxl','certifi','PIL']; "
+        f"mods=[{module_list}]; "
         "missing=[name for name in mods if importlib.util.find_spec(name) is None]; "
         "print(json.dumps(missing))"
     )
@@ -3323,7 +3323,12 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             geojson = resolve_prediction_feature_collection(summary)
             filename = "pipeline_output.geojson"
-            body = json.dumps(geojson, ensure_ascii=False, indent=2).encode("utf-8")
+            body = json.dumps(
+                sanitize_json_payload(geojson),
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/geo+json")
             self.send_header(
@@ -3344,7 +3349,12 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             geojson = build_prediction_display_feature_collection(summary)
             filename = "pipeline_display_output.geojson"
-            body = json.dumps(geojson, ensure_ascii=False, indent=2).encode("utf-8")
+            body = json.dumps(
+                sanitize_json_payload(geojson),
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/geo+json")
             self.send_header(

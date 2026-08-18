@@ -1,4 +1,4 @@
-Place platform-native Python 3.12 payloads here before building fully self-contained installers.
+Place platform-native Python 3.12 payloads here before building the native installer archives.
 
 Expected folders after extracting the platform archives:
 
@@ -7,6 +7,7 @@ Expected folders after extracting the platform archives:
 - `installers/runtimes/macos/`
 
 Each folder should contain the Python 3.12 payload that the installer will use to create `resources/featurehero/.venv` locally on the destination machine.
+The `.venv` itself is not bundled ahead of time; the installer creates it during installation and validates that required modules such as `rasterio` were installed successfully.
 
 Examples:
 
