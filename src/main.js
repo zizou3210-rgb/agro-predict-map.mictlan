@@ -32,7 +32,7 @@ const minZoom = 2;
 const maxZoom = 17;
 const attributesPerPage = 10;
 const tileSize = 256;
-const tileUrlTemplate = "https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png";
+const tileUrlTemplate = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const requiredColumns = [
   "_GPS coordinates_latitude",
   "_GPS coordinates_longitude",

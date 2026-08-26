@@ -3564,6 +3564,24 @@ body.map-expanded {
   -webkit-user-drag: none;
 }
 
+.map-attribution {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  z-index: 4;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #1f2a2f;
+  font-size: 11px;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
+.map-attribution:hover {
+  text-decoration: underline;
+}
+
 .tooltip {
   position: absolute;
   z-index: 3;
