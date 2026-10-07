@@ -124,7 +124,7 @@ def sanitize_value(value: object) -> object:
     return text
 
 
-def dataframe_to_geojson(df: pd.DataFrame, output_file: Path) -> dict[str, object]:
+def dataframe_to_geojson(df: pd.DataFrame, output_file: Path, progress_callback=None) -> dict[str, object]:
     latitude_header = "_GPS coordinates_latitude"
     longitude_header = "_GPS coordinates_longitude"
     if latitude_header not in df.columns or longitude_header not in df.columns:
@@ -134,7 +134,11 @@ def dataframe_to_geojson(df: pd.DataFrame, output_file: Path) -> dict[str, objec
         )
 
     features: list[dict[str, object]] = []
+    if progress_callback:
+        progress_callback(0, len(df))
     for row_number, (_, row) in enumerate(df.iterrows(), start=2):
+        if progress_callback:
+            progress_callback(row_number - 2, len(df))
         latitude = parse_numeric_value(row.get(latitude_header))
         longitude = parse_numeric_value(row.get(longitude_header))
         if latitude is None or longitude is None:
@@ -175,4 +179,6 @@ def dataframe_to_geojson(df: pd.DataFrame, output_file: Path) -> dict[str, objec
     }
     ensure_parent(output_file)
     output_file.write_text(json.dumps(geojson, ensure_ascii=False), encoding="utf-8")
+    if progress_callback:
+        progress_callback(len(df), len(df), True)
     return geojson

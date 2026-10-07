@@ -9,6 +9,56 @@ import shared_cache
 
 
 class SharedCacheTest(unittest.TestCase):
+    def test_daily_climate_cache_batch_round_trip_supports_nulls_and_versions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="daily_climate_sqlite_") as tmp_dir_name:
+            db_path = Path(tmp_dir_name) / "shared_cache.sqlite3"
+            key_v1 = ("CHC_0p05_R1C2", "2026-01-01", 1)
+            key_v2 = ("CHC_0p05_R1C2", "2026-01-01", 2)
+            entries = {
+                key_v1: {"T2M": None, "PRECTOTCORR": None},
+                key_v2: {"T2M": 20.5, "PRECTOTCORR": 1.25},
+            }
+
+            shared_cache.upsert_daily_climate_cache_entries(entries, db_path=db_path)
+            loaded = shared_cache.get_daily_climate_cache_entries(
+                [key_v1, key_v1, key_v2],
+                db_path=db_path,
+            )
+            version_one_range = shared_cache.get_daily_climate_cache_range(
+                "CHC_0p05_R1C2",
+                "2026-01-01",
+                "2026-01-01",
+                cache_version=1,
+                db_path=db_path,
+            )
+
+            self.assertEqual(loaded, entries)
+            self.assertEqual(version_one_range, {key_v1: entries[key_v1]})
+
+            shared_cache.upsert_daily_climate_cache_entries(
+                {key_v1: {"T2M": 21, "PRECTOTCORR": 2}},
+                db_path=db_path,
+            )
+            updated = shared_cache.get_daily_climate_cache_entries([key_v1, key_v2], db_path=db_path)
+
+            self.assertEqual(updated[key_v1], {"T2M": 21.0, "PRECTOTCORR": 2.0})
+            self.assertEqual(updated[key_v2], entries[key_v2])
+
+    def test_daily_climate_cache_rejects_invalid_keys_and_non_finite_values(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="daily_climate_sqlite_") as tmp_dir_name:
+            db_path = Path(tmp_dir_name) / "shared_cache.sqlite3"
+
+            with self.assertRaises(ValueError):
+                shared_cache.upsert_daily_climate_cache_entries(
+                    {("CHC_0p05_R1C2", "not-a-date", 1): {"T2M": 20.0}},
+                    db_path=db_path,
+                )
+            with self.assertRaises(ValueError):
+                shared_cache.upsert_daily_climate_cache_entries(
+                    {("CHC_0p05_R1C2", "2026-01-01", 1): {"T2M": float("nan")}},
+                    db_path=db_path,
+                )
+
     def test_climate_feature_cache_entry_round_trip_uses_sqlite(self) -> None:
         with tempfile.TemporaryDirectory(prefix="shared_cache_sqlite_") as tmp_dir_name:
             db_path = Path(tmp_dir_name) / "shared_cache.sqlite3"

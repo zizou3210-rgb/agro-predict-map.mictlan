@@ -488,9 +488,25 @@ def terminate_existing_pipeline_processes() -> int:
             continue
         if pid <= 0 or pid == current_pid or pid in known_job_pids:
             continue
-        if pipeline_script not in command:
+        try:
+            proc_args = Path(f"/proc/{pid}/cmdline")
+            if proc_args.exists():
+                arguments = [arg.decode("utf-8", errors="replace") for arg in proc_args.read_bytes().split(b"\0") if arg]
+            else:
+                import shlex
+                arguments = shlex.split(command)
+        except (OSError, ValueError):
+            continue
+        if not arguments or not Path(arguments[0]).name.lower().startswith("python") or pipeline_script not in arguments:
             continue
         if terminate_pid(pid):
+            if "--run-dir" in arguments:
+                try:
+                    run_dir = Path(arguments[arguments.index("--run-dir") + 1]).resolve()
+                    if run_dir.parent == PIPELINE_RUNS_DIR.resolve():
+                        _write_pipeline_progress_status(run_dir, status="cancelled", message="The pipeline job was cancelled.")
+                except (IndexError, OSError):
+                    pass
             cancelled_total += 1
     return cancelled_total
 
@@ -2850,32 +2866,9 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         )
 
     def handle_cancel_all_processes(self) -> None:
-        cancelled_pipeline_jobs = 0
-        reap_finished_pipeline_jobs(remove_expired=False)
-        with PIPELINE_JOBS_LOCK:
-            jobs = list(PIPELINE_JOBS.items())
-        for job_id, job in jobs:
-            process = job.get("process")
-            if process is None:
-                continue
-            try:
-                if process.poll() is None:
-                    process.terminate()
-                    run_dir = Path(job.get("run_dir", "")) if str(job.get("run_dir", "")).strip() else None
-                    if run_dir is not None:
-                        _write_pipeline_progress_status(
-                            run_dir,
-                            status="cancelled",
-                            message="The pipeline job was cancelled before completion.",
-                        )
-                    with PIPELINE_JOBS_LOCK:
-                        active_job = PIPELINE_JOBS.get(job_id)
-                        if active_job is not None:
-                            active_job["final_status"] = "cancelled"
-                            active_job["finished_at"] = time.time()
-                    cancelled_pipeline_jobs += 1
-            except Exception:
-                continue
+        # Include pipelines recovered after restarting the server, whose Popen
+        # objects are no longer in this server's in-memory registry.
+        cancelled_pipeline_jobs = terminate_existing_pipeline_processes()
         cancelled_featurehero_jobs = 0
         featurehero_jobs = get_active_featurehero_jobs()
         active_featurehero_jobs: dict[str, object] = {}
@@ -3105,11 +3098,16 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             source_name = str(job_info["source_name"])
             with PIPELINE_JOBS_LOCK:
                 job = PIPELINE_JOBS.get(job_id)
+            if progress_payload.get("status") == "cancelled":
+                self.send_json({"job_id": job_id, "status": "cancelled", "progress": progress_payload})
+                return
             if return_code is None:
                 running_payload: dict[str, object] = {
                     "job_id": job_id,
-                    "status": progress_payload.get("status", "running"),
-                    "progress": progress_payload,
+                    # Completion is published only after the process exits and
+                    # build_completed_payload supplies the map artifacts.
+                    "status": "running",
+                    "progress": {**progress_payload, "status": "running"},
                 }
                 if should_skip_running_preprocess_geojson(job):
                     self.send_json(running_payload)
@@ -3207,11 +3205,16 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
                 cache=PIPELINE_PROGRESS_CACHE,
             ) if progress_file and progress_file.exists() else {}
             print(f"[status] Falling back to cached pipeline status for {job_id}: {exc!r}", file=sys.stderr, flush=True)
+            recovered_status = progress_payload.get("status", "running")
+            if recovered_status == "completed":
+                # A cached completion marker has no result payload. Keep the
+                # client polling until the artifacts can be read successfully.
+                recovered_status = "running"
             self.send_json(
                 {
                     "job_id": job_id,
-                    "status": progress_payload.get("status", "running"),
-                    "progress": progress_payload,
+                    "status": recovered_status,
+                    "progress": {**progress_payload, "status": recovered_status},
                     "warning": "Status payload was recovered after a transient local pipeline read error.",
                 }
             )

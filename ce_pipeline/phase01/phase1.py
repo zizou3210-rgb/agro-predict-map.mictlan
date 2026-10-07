@@ -110,35 +110,36 @@ def _extract_cell_value(cell: ET.Element, shared_strings: list[str]) -> str:
     return raw_value.strip()
 
 
-def read_sheet_headers_and_rows(workbook_path: Path) -> tuple[list[str], list[dict[str, str]]]:
+def read_sheet_headers_and_rows(workbook_path: Path, progress_callback=None) -> tuple[list[str], list[dict[str, str]]]:
     with ZipFile(workbook_path) as workbook_archive:
         shared_strings = _read_shared_strings(workbook_archive)
         sheet_path = _resolve_first_sheet_path(workbook_archive)
+        total_bytes = workbook_archive.getinfo(sheet_path).file_size
+        if progress_callback:
+            progress_callback(0, total_bytes)
+        header_map = {}
+        records = []
+        header_seen = False
         with workbook_archive.open(sheet_path) as handle:
-            sheet_tree = ET.parse(handle)
-
-    rows = sheet_tree.getroot().findall("x:sheetData/x:row", XML_NS)
-    if not rows:
-        return [], []
-
-    header_map: dict[int, str] = {}
-    for cell in rows[0].findall("x:c", XML_NS):
-        reference = cell.get("r", "").strip()
-        if not reference:
-            continue
-        header_map[_column_index_from_reference(reference)] = _extract_cell_value(cell, shared_strings)
-
-    ordered_headers = [header for _, header in sorted(header_map.items())]
-    records: list[dict[str, str]] = []
-    for row in rows[1:]:
-        row_cells = {}
-        for cell in row.findall("x:c", XML_NS):
-            reference = cell.get("r", "").strip()
-            if not reference:
-                continue
-            row_cells[_column_index_from_reference(reference)] = _extract_cell_value(cell, shared_strings)
-        records.append({header: row_cells.get(index, "").strip() for index, header in sorted(header_map.items())})
-    return ordered_headers, records
+            for _, row in ET.iterparse(handle, events=("end",)):
+                if row.tag != "{" + XML_NS["x"] + "}row":
+                    continue
+                row_cells = {}
+                for cell in row.findall("x:c", XML_NS):
+                    reference = cell.get("r", "").strip()
+                    if reference:
+                        row_cells[_column_index_from_reference(reference)] = _extract_cell_value(cell, shared_strings)
+                if not header_seen:
+                    header_map = row_cells
+                    header_seen = True
+                else:
+                    records.append({header: row_cells.get(index, "").strip() for index, header in sorted(header_map.items())})
+                row.clear()
+                if progress_callback:
+                    progress_callback(handle.tell(), total_bytes)
+        if progress_callback:
+            progress_callback(total_bytes, total_bytes, True)
+    return [header for _, header in sorted(header_map.items())], records
 
 
 def build_column_order(definition: dict) -> list[str]:
@@ -288,12 +289,17 @@ def write_xlsx_rows(
     headers: list[str],
     rows: Iterable[Sequence[object]],
     data_row_count: int,
+    progress_callback=None,
 ) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    if progress_callback:
+        progress_callback(0, data_row_count)
     dimension_ref = f"A1:{_column_letter(max(len(headers) - 1, 0))}{max(data_row_count + 1, 1)}"
     with ZipFile(output_file, "w", compression=ZIP_DEFLATED) as archive:
         _write_xlsx_static_parts(archive)
-        with archive.open("xl/worksheets/sheet1.xml", "w") as sheet_handle:
+        # The uncompressed XML size is unknown when streaming starts. Reserve
+        # ZIP64 headers so large Farm workbooks can close successfully.
+        with archive.open("xl/worksheets/sheet1.xml", "w", force_zip64=True) as sheet_handle:
             sheet_handle.write(
                 (
                     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -307,10 +313,16 @@ def write_xlsx_rows(
             sheet_handle.write(_build_row_xml(1, headers).encode("utf-8"))
             for row_index, row in enumerate(rows, start=2):
                 sheet_handle.write(_build_row_xml(row_index, tuple(row)).encode("utf-8"))
+                if progress_callback:
+                    progress_callback(row_index - 1, data_row_count)
             sheet_handle.write(b"</sheetData></worksheet>")
+    if progress_callback:
+        progress_callback(data_row_count, data_row_count, True)
 
 
-def write_xlsx(output_file: Path, headers: list[str], records: list[dict[str, str]]) -> None:
+def write_xlsx(output_file: Path, headers: list[str], records: list[dict[str, str]], progress_callback=None) -> None:
+    if progress_callback is not None:
+        return write_xlsx_rows(output_file, headers, ([record.get(header, "") for header in headers] for record in records), len(records), progress_callback=progress_callback)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     sheet_xml = build_sheet_xml(headers, records)
     with ZipFile(output_file, "w", compression=ZIP_DEFLATED) as archive:

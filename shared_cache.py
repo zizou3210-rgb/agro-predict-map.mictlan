@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+from datetime import date
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -12,6 +14,7 @@ from config_env import resolve_shared_cache_dir
 _DB_LOCK = RLock()
 CLIMATE_FEATURE_CACHE_VERSION = 2
 SOIL_CACHE_VERSION = 1
+DAILY_CLIMATE_CACHE_VERSION = 1
 NASA_CACHE_KIND = "nasa_series"
 CLIMATE_FEATURE_CACHE_KIND = "climate_features"
 SOIL_CACHE_KIND = "soil_points"
@@ -50,6 +53,20 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS daily_climate_cache (
+            pixel_id TEXT NOT NULL,
+            observation_date TEXT NOT NULL,
+            cache_version INTEGER NOT NULL,
+            t2m REAL,
+            prectotcorr REAL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (pixel_id, observation_date, cache_version)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_daily_climate_cache_version_pixel_date
+            ON daily_climate_cache (cache_version, pixel_id, observation_date);
 
         CREATE TABLE IF NOT EXISTS soil_point_cache (
             cache_key TEXT PRIMARY KEY,
@@ -229,6 +246,165 @@ def load_climate_feature_cache(path: Path, *, use_sqlite: bool = True) -> dict[s
 
 def _chunk_values(values: list[str], chunk_size: int = SQLITE_BATCH_SIZE) -> list[list[str]]:
     return [values[index:index + chunk_size] for index in range(0, len(values), chunk_size)]
+
+
+DailyClimateCacheKey = tuple[str, str, int]
+DailyClimateValues = dict[str, float | None]
+
+
+def _normalize_daily_climate_key(key: object) -> DailyClimateCacheKey | None:
+    if not isinstance(key, tuple) or len(key) != 3:
+        return None
+    pixel_id, observation_date, cache_version = key
+    normalized_pixel_id = str(pixel_id or "").strip()
+    normalized_date = str(observation_date or "").strip()
+    try:
+        parsed_date = date.fromisoformat(normalized_date)
+        normalized_version = int(cache_version)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not normalized_pixel_id
+        or parsed_date.isoformat() != normalized_date
+        or normalized_version < 1
+    ):
+        return None
+    return normalized_pixel_id, normalized_date, normalized_version
+
+
+def _normalize_daily_climate_value(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("Daily climate cache values must be numbers or None, not bool.")
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Daily climate cache values must be numbers or None.") from error
+    if not math.isfinite(normalized):
+        raise ValueError("Daily climate cache values must be finite numbers or None.")
+    return normalized
+
+
+def get_daily_climate_cache_entries(
+    cache_keys: list[DailyClimateCacheKey],
+    *,
+    db_path: Path | None = None,
+) -> dict[DailyClimateCacheKey, DailyClimateValues]:
+    normalized_keys = list(dict.fromkeys(
+        normalized
+        for key in cache_keys
+        if (normalized := _normalize_daily_climate_key(key)) is not None
+    ))
+    if not normalized_keys:
+        return {}
+
+    payloads: dict[DailyClimateCacheKey, DailyClimateValues] = {}
+    # Keep the predicate under SQLite's traditional 999-bind-variable limit.
+    key_chunk_size = max(1, min(SQLITE_BATCH_SIZE, 900 // 3))
+    with _DB_LOCK:
+        with _connect(db_path) as connection:
+            for index in range(0, len(normalized_keys), key_chunk_size):
+                chunk = normalized_keys[index:index + key_chunk_size]
+                predicates = " OR ".join(
+                    "(pixel_id = ? AND observation_date = ? AND cache_version = ?)"
+                    for _ in chunk
+                )
+                parameters = tuple(value for key in chunk for value in key)
+                rows = connection.execute(
+                    """
+                    SELECT pixel_id, observation_date, cache_version, t2m, prectotcorr
+                    FROM daily_climate_cache
+                    WHERE """ + predicates,
+                    parameters,
+                ).fetchall()
+                for pixel_id, observation_date, cache_version, t2m, prectotcorr in rows:
+                    key = (str(pixel_id), str(observation_date), int(cache_version))
+                    payloads[key] = {"T2M": t2m, "PRECTOTCORR": prectotcorr}
+    return payloads
+
+
+def get_daily_climate_cache_range(
+    pixel_id: str,
+    start_date: str,
+    end_date: str,
+    *,
+    cache_version: int = DAILY_CLIMATE_CACHE_VERSION,
+    db_path: Path | None = None,
+) -> dict[DailyClimateCacheKey, DailyClimateValues]:
+    normalized_pixel_id = str(pixel_id or "").strip()
+    try:
+        parsed_start = date.fromisoformat(str(start_date))
+        parsed_end = date.fromisoformat(str(end_date))
+        normalized_version = int(cache_version)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Daily climate cache requires ISO dates and an integer version.") from error
+    if (
+        not normalized_pixel_id
+        or parsed_start.isoformat() != str(start_date)
+        or parsed_end.isoformat() != str(end_date)
+        or parsed_end < parsed_start
+        or normalized_version < 1
+    ):
+        raise ValueError("Invalid pixel, date range, or daily climate cache version.")
+
+    with _DB_LOCK:
+        with _connect(db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT pixel_id, observation_date, cache_version, t2m, prectotcorr
+                FROM daily_climate_cache
+                WHERE pixel_id = ? AND cache_version = ?
+                  AND observation_date BETWEEN ? AND ?
+                ORDER BY observation_date
+                """,
+                (normalized_pixel_id, normalized_version, parsed_start.isoformat(), parsed_end.isoformat()),
+            ).fetchall()
+    return {
+        (str(row_pixel_id), str(observation_date), int(row_version)): {
+            "T2M": t2m,
+            "PRECTOTCORR": prectotcorr,
+        }
+        for row_pixel_id, observation_date, row_version, t2m, prectotcorr in rows
+    }
+
+
+def upsert_daily_climate_cache_entries(
+    entries: dict[DailyClimateCacheKey, DailyClimateValues],
+    *,
+    db_path: Path | None = None,
+) -> None:
+    rows = []
+    for raw_key, payload in entries.items():
+        key = _normalize_daily_climate_key(raw_key)
+        if key is None:
+            raise ValueError(f"Invalid daily climate cache key: {raw_key!r}")
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid daily climate cache payload for {key!r}")
+        rows.append((
+            key[0],
+            key[1],
+            key[2],
+            _normalize_daily_climate_value(payload.get("T2M")),
+            _normalize_daily_climate_value(payload.get("PRECTOTCORR")),
+        ))
+    if not rows:
+        return
+
+    with _DB_LOCK:
+        with _connect(db_path) as connection:
+            connection.executemany(
+                """
+                INSERT INTO daily_climate_cache (
+                    pixel_id, observation_date, cache_version, t2m, prectotcorr
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(pixel_id, observation_date, cache_version) DO UPDATE SET
+                    t2m = excluded.t2m,
+                    prectotcorr = excluded.prectotcorr,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                rows,
+            )
 
 
 def _update_last_accessed_at(
@@ -582,6 +758,35 @@ def load_soil_cache_payload(path: Path, *, use_sqlite: bool = True) -> dict[str,
         if isinstance(cache_key, str) and isinstance(point_payload, dict):
             payload["points"][cache_key] = point_payload
     return payload
+
+
+def get_soil_cache_entries(
+    cache_keys: list[str], *, db_path: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Read requested soil points in batches without per-miss JSON scans."""
+    keys = list(dict.fromkeys(cache_keys))
+    if not keys:
+        return {}
+    result = {}
+    with _DB_LOCK:
+        with _connect(db_path) as connection:
+            _ensure_soil_seeded(connection)
+            for offset in range(0, len(keys), 400):
+                batch = keys[offset:offset + 400]
+                placeholders = ",".join("?" for _ in batch)
+                rows = connection.execute(
+                    f"SELECT cache_key, payload_json FROM soil_point_cache "
+                    f"WHERE cache_version = ? AND cache_key IN ({placeholders})",
+                    [SOIL_CACHE_VERSION, *batch],
+                ).fetchall()
+                for key, raw in rows:
+                    try:
+                        value = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(value, dict):
+                        result[key] = value
+    return result
 
 
 def get_soil_cache_entry(

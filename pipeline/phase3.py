@@ -57,8 +57,10 @@ class Phase3Outputs:
     xlsx_file: Path
 
 
-def build_final_df(df: pd.DataFrame) -> pd.DataFrame:
+def build_final_df(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
     final_df = df.copy()
+    if progress_callback:
+        progress_callback(0, 10)
     if (
         IS_FERTILIZER_COLUMN in final_df.columns
         and FERTILIZER_TIMES_COLUMN in final_df.columns
@@ -76,6 +78,8 @@ def build_final_df(df: pd.DataFrame) -> pd.DataFrame:
             1,
         )
 
+    if progress_callback:
+        progress_callback(1, 10)
     final_df = final_df.drop(
         columns=[
             LOG_COLUMN_SOURCE,
@@ -87,6 +91,8 @@ def build_final_df(df: pd.DataFrame) -> pd.DataFrame:
     )
     final_df = final_df.rename(columns={LOG_COLUMN_OUTPUT: LOG_COLUMN_SOURCE})
 
+    if progress_callback:
+        progress_callback(2, 10)
     if ZERO_TO_EMPTY_COLUMN in final_df.columns:
         grain_moisture = pd.to_numeric(final_df[ZERO_TO_EMPTY_COLUMN], errors="coerce")
         final_df[ZERO_TO_EMPTY_COLUMN] = final_df[ZERO_TO_EMPTY_COLUMN].mask(
@@ -94,6 +100,8 @@ def build_final_df(df: pd.DataFrame) -> pd.DataFrame:
             pd.NA,
         )
 
+    if progress_callback:
+        progress_callback(3, 10)
     if HARVEST_STAND_PERCENT_COLUMN in final_df.columns and YIELD_COLUMN in final_df.columns:
         harvest_stand_percent = pd.to_numeric(
             final_df[HARVEST_STAND_PERCENT_COLUMN],
@@ -104,26 +112,40 @@ def build_final_df(df: pd.DataFrame) -> pd.DataFrame:
             HARVEST_STAND_PERCENT_COLUMN
         ].mask(harvest_stand_percent.eq(0) & yield_values.gt(0), pd.NA)
 
+    if progress_callback:
+        progress_callback(4, 10)
     if GENDER_COLUMN in final_df.columns:
         final_df[GENDER_COLUMN] = final_df[GENDER_COLUMN].replace(
             GENDER_OLD_VALUE,
             GENDER_NEW_VALUE,
         )
+    if progress_callback:
+        progress_callback(5, 10)
     if EDUCATION_COLUMN in final_df.columns:
         final_df[EDUCATION_COLUMN] = final_df[EDUCATION_COLUMN].replace(
             EDUCATION_OLD_VALUE,
             EDUCATION_NEW_VALUE,
         )
+    if progress_callback:
+        progress_callback(6, 10)
     if SOIL_COLUMN in final_df.columns:
         final_df[SOIL_COLUMN] = final_df[SOIL_COLUMN].replace(SOIL_REPLACEMENTS)
+    if progress_callback:
+        progress_callback(7, 10)
     if SOIL_DEPTH_COLUMN in final_df.columns:
         final_df[SOIL_DEPTH_COLUMN] = final_df[SOIL_DEPTH_COLUMN].replace(
             SOIL_DEPTH_REPLACEMENTS
         )
+    if progress_callback:
+        progress_callback(8, 10)
     if CROPPING_PRACTICES_COLUMN in final_df.columns:
         final_df[CROPPING_PRACTICES_COLUMN] = final_df[
             CROPPING_PRACTICES_COLUMN
         ].replace(CROPPING_PRACTICES_OLD_VALUE, CROPPING_PRACTICES_NEW_VALUE)
+    if progress_callback:
+        progress_callback(9, 10)
+    if progress_callback:
+        progress_callback(10, 10, True)
     return final_df
 
 

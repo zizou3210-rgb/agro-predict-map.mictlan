@@ -442,23 +442,37 @@ def normalize_key_value(value: object) -> str:
     return normalize_text(value)
 
 
-def write_workbook(path: Path, sheet_name: str, headers: list[str], records: list[dict[str, object]]) -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
+def write_workbook(path: Path, sheet_name: str, headers: list[str], records: list[dict[str, object]], progress_callback=None) -> None:
+    workbook = Workbook(write_only=progress_callback is not None)
+    worksheet = workbook.create_sheet() if progress_callback is not None else workbook.active
     worksheet.title = sheet_name
     worksheet.append(headers)
-    for record in records:
+    if progress_callback:
+        progress_callback(0, len(records))
+    for index, record in enumerate(records, 1):
         worksheet.append([record.get(header) for header in headers])
+        if progress_callback:
+            progress_callback(index, len(records))
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
+    if progress_callback:
+        progress_callback(len(records), len(records), True)
 
 
-def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]], progress_callback=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        if progress_callback is None:
+            writer.writerows(rows)
+        else:
+            progress_callback(0, len(rows))
+            for completed, row in enumerate(rows, 1):
+                writer.writerow(row)
+                progress_callback(completed, len(rows))
+    if progress_callback:
+        progress_callback(len(rows), len(rows), True)
 
 
 def write_metadata(path: Path, payload: dict[str, object]) -> None:
@@ -1312,6 +1326,7 @@ def expand_records_for_country_localities(
 def expand_records_for_manual_bbox_localities(
     records: list[dict[str, object]],
     climate_override: dict[str, object],
+    progress_callback=None,
 ) -> tuple[list[dict[str, object]], list[dict[str, str]], dict[str, object]]:
     try:
         latitude_min = float(climate_override.get("regional_bounds_latitude_min"))
@@ -1347,6 +1362,9 @@ def expand_records_for_manual_bbox_localities(
     expanded_records: list[dict[str, object]] = []
     data_input_rows: list[dict[str, str]] = []
     projected_records = records if use_source_row_dates else collapse_records_for_locality_projection(records)
+    total_rows = len(projected_records) * len(grid_cells)
+    if progress_callback:
+        progress_callback(0, total_rows)
     for record in projected_records:
         for grid_cell in grid_cells:
             expanded = dict(record)
@@ -1375,6 +1393,11 @@ def expand_records_for_manual_bbox_localities(
             expanded[SELECTED_MODEL_ID_HEADER] = selected_model_id
             expanded_records.append(expanded)
             data_input_rows.append(build_climate_input_row(expanded))
+            if progress_callback:
+                progress_callback(len(expanded_records), total_rows)
+
+    if progress_callback:
+        progress_callback(total_rows, total_rows, True)
 
     return expanded_records, data_input_rows, {
         "manual_bbox_locality_count": len(grid_cells),

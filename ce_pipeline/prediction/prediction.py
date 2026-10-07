@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+from pipeline.progress import work_progress, write_dataframe_excel, write_dataframe_csv, reported_operation
 from openpyxl import load_workbook
 
 from ce_pipeline.phase01.phase1 import (
@@ -579,10 +580,11 @@ def build_prediction_phase02_workbook(
     selected_germplasm_row_ids: list[str] | None = None,
     selected_germplasm_selection_mode: str = "all_matches",
     selected_id_header: str = "",
+    progress_callback=None,
 ) -> dict[str, object]:
     definition = selection_summary
     ordered_headers = build_column_order(definition)
-    headers, records = read_sheet_headers_and_rows(uploaded_workbook)
+    headers, records = read_sheet_headers_and_rows(uploaded_workbook, progress_callback=work_progress(progress_callback, 12, "Reading Farm prediction input", phase="phase02", unit="bytes") if progress_callback else None)
     if not headers:
         raise ValueError("The uploaded prediction workbook is empty.")
     resolved_farm_header = _resolve_existing_header(headers, "Farm")
@@ -596,6 +598,8 @@ def build_prediction_phase02_workbook(
     )
     if normalized_selected_id_header and normalized_selected_id_header in headers and normalized_selected_id_header not in ordered_headers:
         ordered_headers.append(normalized_selected_id_header)
+    preparing = work_progress(progress_callback, 12, "Preparing Farm profiles", phase="phase02", unit="steps")
+    preparing(0, 3)
     annotated_records = _annotate_prediction_internal_row_ids(records)
     if PREDICTION_INTERNAL_ROW_ID_HEADER not in ordered_headers:
         ordered_headers.append(PREDICTION_INTERNAL_ROW_ID_HEADER)
@@ -624,6 +628,7 @@ def build_prediction_phase02_workbook(
         raise ValueError("The selected germplasm filter produced no records for prediction.")
     filtered_records = _apply_selected_id_fallbacks(filtered_records, normalized_selected_id_header)
 
+    preparing(1, 3)
     profiled_records, profile_metadata = _build_germplasm_profile_metadata(
         filtered_records,
         headers,
@@ -646,6 +651,7 @@ def build_prediction_phase02_workbook(
         regional_bounds_longitude_max,
     )
 
+    preparing(2, 3)
     output_records: list[dict[str, str]] = []
     for record in profiled_records:
         output_record = {header: str(record.get(header, "") or "").strip() for header in ordered_headers}
@@ -690,7 +696,8 @@ def build_prediction_phase02_workbook(
         PREDICTION_GROUP_LABEL_HEADER,
         PREDICTION_GROUP_REP_HEADER,
     ])
-    write_xlsx(output_file, output_headers, output_records)
+    preparing(3, 3, True)
+    write_xlsx(output_file, output_headers, output_records, progress_callback=work_progress(progress_callback, 12, "Saving Farm prediction input", phase="phase02") if progress_callback else None)
     return {
         "phase": "phase02prediction",
         "source_workbook": str(uploaded_workbook),
@@ -753,6 +760,7 @@ def _postprocess_multi_profile_prediction_results(
     prediction_xlsx: Path,
     prediction_csv: Path,
     profile_metadata: dict[str, object],
+    progress_callback=None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     if not profile_metadata.get("multi_profile_mode"):
         return geojson, {
@@ -762,7 +770,10 @@ def _postprocess_multi_profile_prediction_results(
     target_mean_threshold = _parse_float(profile_metadata.get("target_mean_threshold"))
     features = geojson.get("features", []) if isinstance(geojson, dict) else []
     profile_stats: dict[str, dict[str, object]] = {}
-    for feature in features:
+    report = work_progress(progress_callback, 99, "Analyzing prediction profiles", phase="phase05")
+    report(0, len(features))
+    for completed, feature in enumerate(features, 1):
+        report(completed, len(features))
         if not isinstance(feature, dict):
             continue
         properties = feature.get("properties", {}) if isinstance(feature.get("properties"), dict) else {}
@@ -774,6 +785,7 @@ def _postprocess_multi_profile_prediction_results(
         if predicted_value is not None:
             bucket["values"].append(predicted_value)
 
+    report(len(features), len(features), True)
     profile_summary_updates: list[dict[str, object]] = []
     allowed_profile_keys: set[str] = set()
     for profile_summary in profile_metadata.get("profile_summaries", []) if isinstance(profile_metadata.get("profile_summaries"), list) else []:
@@ -801,7 +813,10 @@ def _postprocess_multi_profile_prediction_results(
             allowed_profile_keys.add(str(fallback.get("key") or ""))
 
     annotated_features = []
-    for feature in features:
+    report = work_progress(progress_callback, 99, "Annotating Farm prediction profiles", phase="phase05")
+    report(0, len(features))
+    for completed, feature in enumerate(features, 1):
+        report(completed, len(features))
         if not isinstance(feature, dict):
             continue
         properties = feature.get("properties", {}) if isinstance(feature.get("properties"), dict) else {}
@@ -814,12 +829,13 @@ def _postprocess_multi_profile_prediction_results(
         updated_feature["properties"] = updated_properties
         annotated_features.append(updated_feature)
 
+    report(len(features), len(features), True)
     filtered_geojson = dict(geojson)
     filtered_metadata = dict(filtered_geojson.get("metadata", {}) if isinstance(filtered_geojson.get("metadata"), dict) else {})
     filtered_metadata["total_features"] = len(annotated_features)
     filtered_geojson["metadata"] = filtered_metadata
     filtered_geojson["features"] = annotated_features
-    geojson_file.write_text(json.dumps(filtered_geojson, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    reported_operation(progress_callback, 99, "Saving annotated profile map", "phase05", lambda: geojson_file.write_text(json.dumps(filtered_geojson, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"))
 
     return filtered_geojson, {
         "multi_profile_mode": True,
@@ -854,12 +870,16 @@ def _aggregate_prediction_dataframe_by_selected_id(
     prediction_df: pd.DataFrame,
     *,
     selected_id_header: str,
+    progress_callback=None,
 ) -> pd.DataFrame:
+    report = work_progress(progress_callback, 99, "Aggregating predictions by selected identifier", phase="phase05")
+    report(0, len(prediction_df))
     normalized_selected_id_header = str(selected_id_header or "").strip()
     required_columns = {"Name", PREDICTION_PREDICTED_COLUMN}
     if normalized_selected_id_header:
         required_columns.add(normalized_selected_id_header)
     if not required_columns.issubset(set(prediction_df.columns)):
+        report(len(prediction_df), len(prediction_df), True)
         return prediction_df
 
     grouping_columns = [
@@ -885,9 +905,11 @@ def _aggregate_prediction_dataframe_by_selected_id(
     if normalized_selected_id_header and normalized_selected_id_header in prediction_df.columns:
         grouping_columns.append(normalized_selected_id_header)
     if "Name" not in grouping_columns:
+        report(len(prediction_df), len(prediction_df), True)
         return prediction_df
 
     aggregated_rows: list[dict[str, object]] = []
+    consumed = 0
     for _, group_df in prediction_df.groupby(grouping_columns, dropna=False, sort=False):
         aggregated_row: dict[str, object] = {}
         for column in prediction_df.columns:
@@ -905,6 +927,9 @@ def _aggregate_prediction_dataframe_by_selected_id(
                 continue
             aggregated_row[column] = _first_non_blank_value(group_df[column])
         aggregated_rows.append(aggregated_row)
+        consumed += len(group_df)
+        report(consumed, len(prediction_df))
+    report(len(prediction_df), len(prediction_df), True)
     return pd.DataFrame(aggregated_rows, columns=[column for column in prediction_df.columns if column != PREDICTION_INTERNAL_ROW_ID_HEADER])
 
 
@@ -956,26 +981,33 @@ def _sort_prediction_output_files(
     latitude_column: str,
     longitude_column: str,
     selected_id_header: str,
+    progress_callback=None,
 ) -> None:
     if prediction_xlsx.exists():
-        prediction_df = pd.read_excel(prediction_xlsx)
+        prediction_df = reported_operation(progress_callback, 99, "Reading Farm prediction workbook for sorting", "phase05", lambda: pd.read_excel(prediction_xlsx))
+        sorting = work_progress(progress_callback, 99, "Sorting Farm prediction results", phase="phase05", unit="steps")
+        sorting(0, 1)
         prediction_df = _prepare_prediction_output_dataframe_for_display(
             prediction_df,
             latitude_column=latitude_column,
             longitude_column=longitude_column,
             selected_id_header=selected_id_header,
         )
-        prediction_df.to_excel(prediction_xlsx, index=False)
+        sorting(1, 1, True)
+        write_dataframe_excel(prediction_df, prediction_xlsx, work_progress(progress_callback, 99, "Saving sorted Farm prediction workbook", phase="phase05", unit="cells") if progress_callback else None)
 
     if prediction_csv.exists():
-        prediction_df = pd.read_csv(prediction_csv)
+        prediction_df = reported_operation(progress_callback, 99, "Reading Farm prediction CSV for sorting", "phase05", lambda: pd.read_csv(prediction_csv))
+        sorting = work_progress(progress_callback, 99, "Sorting Farm prediction results", phase="phase05", unit="steps")
+        sorting(0, 1)
         prediction_df = _prepare_prediction_output_dataframe_for_display(
             prediction_df,
             latitude_column=latitude_column,
             longitude_column=longitude_column,
             selected_id_header=selected_id_header,
         )
-        prediction_df.to_csv(prediction_csv, index=False)
+        sorting(1, 1, True)
+        write_dataframe_csv(prediction_df, prediction_csv, work_progress(progress_callback, 99, "Saving sorted Farm prediction CSV", phase="phase05") if progress_callback else None)
 
 
 def _should_use_manual_grid_dataframe_finalization(
@@ -1010,7 +1042,10 @@ def _build_lightweight_manual_grid_geojson_dataframe(
 
 def _aggregate_manual_grid_prediction_dataframe_for_display(
     prediction_df: pd.DataFrame,
+    progress_callback=None,
 ) -> pd.DataFrame:
+    report = work_progress(progress_callback, 99, "Selecting display predictions by grid cell", phase="phase05")
+    report(0, len(prediction_df))
     required_columns = {
         "Forecast grid cell id",
         "_GPS coordinates_latitude",
@@ -1018,10 +1053,14 @@ def _aggregate_manual_grid_prediction_dataframe_for_display(
         PREDICTION_PREDICTED_COLUMN,
     }
     if not required_columns.issubset(set(prediction_df.columns)):
+        report(len(prediction_df), len(prediction_df), True)
         return prediction_df
 
     aggregated_rows: list[dict[str, object]] = []
+    consumed = 0
     for grid_cell_id, group_df in prediction_df.groupby("Forecast grid cell id", dropna=False, sort=False):
+        consumed += len(group_df)
+        report(consumed, len(prediction_df))
         if pd.isna(grid_cell_id) or not str(grid_cell_id).strip():
             continue
         numeric_series = pd.to_numeric(group_df[PREDICTION_PREDICTED_COLUMN], errors="coerce")
@@ -1032,7 +1071,9 @@ def _aggregate_manual_grid_prediction_dataframe_for_display(
         aggregated_rows.append(dict(representative))
 
     if not aggregated_rows:
+        report(len(prediction_df), len(prediction_df), True)
         return prediction_df
+    report(len(prediction_df), len(prediction_df), True)
     return pd.DataFrame(aggregated_rows, columns=list(prediction_df.columns) + [
         column for column in ("Prediction cell row count", "Prediction cell replication count")
         if column not in prediction_df.columns
@@ -1044,18 +1085,35 @@ def _restore_selected_id_column_in_phase04_workbook(
     phase03_workbook: Path,
     phase04_workbook: Path,
     selected_id_header: str,
+    progress_callback=None,
 ) -> None:
+    checking = work_progress(progress_callback, 88, "Checking selected identifier", phase="phase04", unit="steps")
+    checking(0, 2)
     normalized_header = str(selected_id_header or "").strip()
     if not normalized_header or not phase03_workbook.exists() or not phase04_workbook.exists():
+        checking(2, 2, True)
         return
 
+    source_headers = _read_workbook_headers(phase03_workbook)
+    checking(1, 2)
+    output_headers = _read_workbook_headers(phase04_workbook)
+    checking(2, 2, True)
+    if normalized_header not in source_headers or normalized_header in output_headers:
+        return
+
+    loading = work_progress(progress_callback, 88, "Loading identifier restoration workbooks", phase="phase04", unit="files")
+    loading(0, 2)
     phase03_df = pd.read_excel(phase03_workbook, dtype=object)
+    loading(1, 2)
     phase04_df = pd.read_excel(phase04_workbook, dtype=object)
+    loading(2, 2, True)
     phase03_df.columns = [str(column).strip() for column in phase03_df.columns]
     phase04_df.columns = [str(column).strip() for column in phase04_df.columns]
     if normalized_header not in phase03_df.columns or normalized_header in phase04_df.columns:
         return
 
+    restoring = work_progress(progress_callback, 88, "Restoring selected identifier", phase="phase04", unit="steps")
+    restoring(0, 1)
     if "CE Row ID" in phase03_df.columns and "CE Row ID" in phase04_df.columns:
         source_values = (
             phase03_df.loc[:, ["CE Row ID", normalized_header]]
@@ -1068,9 +1126,14 @@ def _restore_selected_id_column_in_phase04_workbook(
     elif len(phase03_df.index) == len(phase04_df.index):
         phase04_df[normalized_header] = phase03_df[normalized_header].tolist()
     else:
+        restoring(1, 1, True)
         return
 
-    phase04_df.to_excel(phase04_workbook, index=False)
+    restoring(1, 1, True)
+    write_dataframe_excel(
+        phase04_df, phase04_workbook,
+        work_progress(progress_callback, 88, "Saving restored identifier workbook", phase="phase04", unit="cells"),
+    )
 
 
 def update_saved_model_prediction_metadata(
@@ -1245,14 +1308,17 @@ def run_ce_saved_model_prediction(
     progress_callback=None,
 ) -> CeSavedModelPredictionOutputs:
     selected_id_header = str(selected_id_header or "").strip()
-    registered_model, selection_summary, selection_summary_file = _resolve_saved_model(selected_model_id)
-    saved_normalization_stats = _read_saved_normalization_stats(registered_model.metadata, registered_model.model_dir)
+    registered_model, selection_summary, selection_summary_file = reported_operation(progress_callback, 10, "Loading saved Farm model definition", "phase02", lambda: _resolve_saved_model(selected_model_id))
+    saved_normalization_stats = reported_operation(progress_callback, 10, "Loading saved normalization statistics", "phase02", lambda: _read_saved_normalization_stats(registered_model.metadata, registered_model.model_dir))
+    validation = work_progress(progress_callback, 10, "Validating Farm prediction input", phase="phase02", unit="steps")
+    validation(0, 1)
     validate_saved_model_prediction_workbook(
         uploaded_workbook,
         selected_model_id=selected_model_id,
         climate_scope="regional_manual",
     )
 
+    validation(1, 1, True)
     ce_dir = run_dir / "ce_pipeline_prediction"
     phase02_dir = ce_dir / "phase02"
     phase03_dir = ce_dir / "phase03"
@@ -1260,14 +1326,6 @@ def run_ce_saved_model_prediction(
     phase05_dir = ce_dir / "phase05"
     for directory in (phase02_dir, phase03_dir, phase04_dir, phase05_dir):
         directory.mkdir(parents=True, exist_ok=True)
-
-    if progress_callback:
-        progress_callback(
-            12,
-            "Preparing ce prediction input",
-            "Validating the uploaded workbook against the saved model definition and building the prediction phase02 workbook.",
-            None,
-        )
 
     phase02_prediction_path = phase02_dir / "phase02prediction.xlsx"
     phase02_log = build_prediction_phase02_workbook(
@@ -1285,19 +1343,12 @@ def run_ce_saved_model_prediction(
         selected_germplasm_row_ids=selected_germplasm_row_ids,
         selected_germplasm_selection_mode=selected_germplasm_selection_mode,
         selected_id_header=selected_id_header,
+        progress_callback=progress_callback,
     )
     (phase02_dir / "phase02prediction_log.json").write_text(
         json.dumps(phase02_log, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-
-    if progress_callback:
-        progress_callback(
-            22,
-            "Preparing phase03 climate enrichment",
-            "Expanding the selected germplasm rows across the manual bounding-box grid and preparing CHIRPS/CHIRTS-daily climate downloads.",
-            {"phase": "phase03", "climate_days_processed": 0, "climate_days_total": 0},
-        )
 
     phase03_prediction_path = phase03_dir / "phase03prediction.xlsx"
     phase03_log_path = phase03_dir / "phase03prediction_log.json"
@@ -1349,16 +1400,9 @@ def run_ce_saved_model_prediction(
         phase03_workbook=phase03_prediction_path,
         phase04_workbook=phase04_prediction_path,
         selected_id_header=selected_id_header,
+        progress_callback=progress_callback,
     )
     phase04_training_csv = phase04_dir / "phase04prediction_training_input.csv"
-
-    if progress_callback:
-        progress_callback(
-            90,
-            "Running saved model prediction",
-            "Executing the selected Grain Yield model using phase04prediction.xlsx as the prediction input.",
-            None,
-        )
 
     target_column = str((selection_summary.get("initial_settings", {}) if isinstance(selection_summary, dict) else {}).get("target_column", "")).strip()
     phase05_outputs = run_ce_phase05(
@@ -1383,13 +1427,13 @@ def run_ce_saved_model_prediction(
     ):
         phase05_prediction_csv = Path(phase05_outputs.summary["prediction_csv"])
         if phase05_prediction_csv.exists():
-            final_prediction_df = pd.read_csv(phase05_prediction_csv)
+            final_prediction_df = reported_operation(progress_callback, 99, "Reading prediction results", "phase05", lambda: pd.read_csv(phase05_prediction_csv))
         else:
-            final_prediction_df = pd.read_excel(Path(phase05_outputs.summary["prediction_xlsx"]))
+            final_prediction_df = reported_operation(progress_callback, 99, "Reading prediction results", "phase05", lambda: pd.read_excel(Path(phase05_outputs.summary["prediction_xlsx"])))
     else:
-        shutil.copy2(Path(phase05_outputs.summary["prediction_xlsx"]), final_prediction_xlsx)
-        shutil.copy2(Path(phase05_outputs.summary["prediction_csv"]), final_prediction_csv)
-        final_prediction_df = pd.read_excel(final_prediction_xlsx)
+        reported_operation(progress_callback, 99, "Copying final prediction workbook", "phase05", lambda: shutil.copy2(Path(phase05_outputs.summary["prediction_xlsx"]), final_prediction_xlsx))
+        reported_operation(progress_callback, 99, "Copying final prediction CSV", "phase05", lambda: shutil.copy2(Path(phase05_outputs.summary["prediction_csv"]), final_prediction_csv))
+        final_prediction_df = reported_operation(progress_callback, 99, "Reading Farm prediction results", "phase05", lambda: pd.read_excel(final_prediction_xlsx))
     if not _should_preserve_manual_grid_prediction_rows(
         climate_scope="regional_manual",
         selected_id_header=selected_id_header,
@@ -1398,13 +1442,17 @@ def run_ce_saved_model_prediction(
         final_prediction_df = _aggregate_prediction_dataframe_by_selected_id(
             final_prediction_df,
             selected_id_header=selected_id_header,
+            progress_callback=progress_callback,
         )
+    arrangement = work_progress(progress_callback, 99, "Arranging Farm prediction columns", phase="phase05", unit="steps")
+    arrangement(0, 1)
     final_prediction_df = _prepare_prediction_output_dataframe_for_display(
         final_prediction_df,
         latitude_column=str(initial_settings.get("latitude_column", "")).strip(),
         longitude_column=str(initial_settings.get("longitude_column", "")).strip(),
         selected_id_header=selected_id_header,
     )
+    arrangement(1, 1, True)
     if _should_use_manual_grid_dataframe_finalization(
         climate_scope="regional_manual",
         selected_id_header=selected_id_header,
@@ -1413,8 +1461,8 @@ def run_ce_saved_model_prediction(
             final_prediction_df,
             manual_bbox_grid=(phase03_log.get("nasa", {}) if isinstance(phase03_log, dict) else {}).get("manual_bbox_grid"),
         )
-    final_prediction_df.to_excel(final_prediction_xlsx, index=False)
-    final_prediction_df.to_csv(final_prediction_csv, index=False)
+    write_dataframe_excel(final_prediction_df, final_prediction_xlsx, work_progress(progress_callback, 99, "Saving final prediction workbook", phase="phase05", unit="cells"))
+    write_dataframe_csv(final_prediction_df, final_prediction_csv, work_progress(progress_callback, 99, "Saving final prediction CSV", phase="phase05"))
     geojson_source_df = (
         _build_lightweight_manual_grid_geojson_dataframe(
             final_prediction_df,
@@ -1426,9 +1474,9 @@ def run_ce_saved_model_prediction(
         )
         else final_prediction_df
     )
-    aggregated_geojson = dataframe_to_geojson(geojson_source_df, phase05_outputs.geojson_file)
+    aggregated_geojson = dataframe_to_geojson(geojson_source_df, phase05_outputs.geojson_file, progress_callback=work_progress(progress_callback, 99, "Preparing final map output", phase="phase05"))
     display_prediction_df = (
-        _aggregate_manual_grid_prediction_dataframe_for_display(final_prediction_df)
+        _aggregate_manual_grid_prediction_dataframe_for_display(final_prediction_df, progress_callback=progress_callback)
         if _should_use_manual_grid_dataframe_finalization(
             climate_scope="regional_manual",
             selected_id_header=selected_id_header,
@@ -1446,7 +1494,10 @@ def run_ce_saved_model_prediction(
         )
         else display_prediction_df
     )
-    display_geojson = dataframe_to_geojson(display_geojson_source_df, display_geojson_file)
+    display_geojson = dataframe_to_geojson(
+        display_geojson_source_df, display_geojson_file,
+        progress_callback=work_progress(progress_callback, 99, "Preparing display grid", phase="phase05"),
+    )
 
     profile_metadata = phase02_log.get("prediction_profile_analysis", {}) if isinstance(phase02_log, dict) else {}
     filtered_geojson, profile_summary_updates = _postprocess_multi_profile_prediction_results(
@@ -1455,6 +1506,7 @@ def run_ce_saved_model_prediction(
         prediction_xlsx=final_prediction_xlsx,
         prediction_csv=final_prediction_csv,
         profile_metadata=profile_metadata if isinstance(profile_metadata, dict) else {},
+        progress_callback=progress_callback,
     )
     if not _should_use_manual_grid_dataframe_finalization(
         climate_scope="regional_manual",
@@ -1466,6 +1518,7 @@ def run_ce_saved_model_prediction(
             latitude_column=str(initial_settings.get("latitude_column", "")).strip(),
             longitude_column=str(initial_settings.get("longitude_column", "")).strip(),
             selected_id_header=selected_id_header,
+            progress_callback=progress_callback,
         )
 
     summary = {
@@ -1518,7 +1571,7 @@ def run_ce_saved_model_prediction(
         ],
     }
     summary_file = run_dir / "summary.json"
-    summary_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    reported_operation(progress_callback, 99, "Saving prediction summary", "phase05", lambda: summary_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"))
     return CeSavedModelPredictionOutputs(
         summary=summary,
         geojson=filtered_geojson,

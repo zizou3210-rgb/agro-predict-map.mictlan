@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import time
+from pipeline.progress import work_progress, write_dataframe_excel, write_dataframe_csv
 import os
 import pickle
 import subprocess
@@ -232,6 +234,7 @@ def run_prediction_subprocess(
     resolved_model: ResolvedModel,
     model_input_csv: Path,
     predictions_json: Path,
+    progress_callback=None,
 ) -> None:
     featurehero_python = get_featurehero_python()
     featurehero_repo = get_featurehero_repo()
@@ -259,6 +262,28 @@ def run_prediction_subprocess(
         "--output-json",
         str(predictions_json),
     ]
+    if progress_callback is not None:
+        progress_path = predictions_json.with_suffix(".progress.json")
+        progress_path.unlink(missing_ok=True)
+        command.extend(["--progress-json", str(progress_path)])
+        # File-backed output avoids blocking when a dependency writes many logs.
+        with predictions_json.with_suffix(".runtime.log").open("w+") as runtime_log:
+            process = subprocess.Popen(command, cwd=str(ROOT_DIR), env=env, stdout=runtime_log, stderr=runtime_log)
+            try:
+                while process.poll() is None:
+                    if progress_path.exists():
+                        payload = json.loads(progress_path.read_text())
+                        progress_callback(payload["completed"], payload["total"])
+                    time.sleep(0.5)
+                if process.returncode:
+                    runtime_log.seek(0)
+                    raise RuntimeError(runtime_log.read()[-4000:] or "The Grain Yield prediction subprocess failed.")
+                payload = json.loads(progress_path.read_text())
+                progress_callback(payload["completed"], payload["total"], True)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+        return
     result = subprocess.run(
         command,
         cwd=str(ROOT_DIR),
@@ -276,6 +301,7 @@ def run_grain_yield_prediction(
     phase5_csv: Path,
     model_dir: Path,
     selected_model_id: str | None = None,
+    progress_callback=None,
 ) -> GrainYieldPredictionOutputs:
     model_dir.mkdir(parents=True, exist_ok=True)
     model_input_csv = model_dir / "grain_yield_model_input.csv"
@@ -283,16 +309,21 @@ def run_grain_yield_prediction(
     output_csv = model_dir / "phase5_with_predictions.csv"
     output_xlsx = model_dir / "phase5_with_predictions.xlsx"
 
+    preparation = work_progress(progress_callback, 90, "Preparing saved model inputs", phase="phase05", unit="steps")
+    preparation(0, 3)
     resolved_model = resolve_active_model(selected_model_id=selected_model_id)
+    preparation(1, 3)
     phase5_df = pd.read_csv(phase5_csv, dtype=object)
+    preparation(2, 3)
     feature_names = resolve_prediction_feature_names(
         resolved_model.model_file,
         resolved_model.best_features_file,
         resolved_model.sort_original_file,
     )
     model_input_df = build_model_input(phase5_df, feature_names)
-    model_input_df.to_csv(model_input_csv, index=False)
-    run_prediction_subprocess(resolved_model, model_input_csv, predictions_json)
+    preparation(3, 3, True)
+    write_dataframe_csv(model_input_df, model_input_csv, work_progress(progress_callback, 90, "Saving model inference input", phase="phase05") if progress_callback else None)
+    run_prediction_subprocess(resolved_model, model_input_csv, predictions_json, progress_callback=work_progress(progress_callback, 96, "Running saved model prediction", phase="phase05") if progress_callback else None)
 
     predictions_payload = json.loads(predictions_json.read_text(encoding="utf-8"))
     predictions = predictions_payload["predictions"]
@@ -304,8 +335,8 @@ def run_grain_yield_prediction(
         else len(predicted_df.columns)
     )
     predicted_df.insert(insert_at, PREDICTED_COLUMN, predictions)
-    predicted_df.to_csv(output_csv, index=False)
-    predicted_df.to_excel(output_xlsx, index=False)
+    write_dataframe_csv(predicted_df, output_csv, work_progress(progress_callback, 96, "Saving model predictions CSV", phase="phase05") if progress_callback else None)
+    write_dataframe_excel(predicted_df, output_xlsx, work_progress(progress_callback, 96, "Saving model predictions workbook", phase="phase05", unit="cells") if progress_callback else None)
 
     return GrainYieldPredictionOutputs(
         dataframe=predicted_df,

@@ -18,6 +18,7 @@ from typing import Callable
 
 import pandas as pd
 
+from pipeline.progress import work_progress, write_dataframe_excel, write_dataframe_csv
 from pipeline.phase3 import build_final_df
 from pipeline.phase4 import normalize_dummy_source_value
 from pipeline.phase5 import apply_log_transform, clean_numeric_series, should_apply_log
@@ -131,7 +132,11 @@ def create_phase04_workbook(
     initial_settings = definition.get("initial_settings", {})
     divisions = definition.get("divisions", {})
 
-    headers, records = phase01.read_sheet_headers_and_rows(phase03_workbook)
+    headers, records = phase01.read_sheet_headers_and_rows(
+        phase03_workbook, progress_callback=work_progress(
+            progress_callback, 72, "Building phase04prediction", phase="phase04", unit="bytes",
+        ),
+    )
     if not headers:
         raise ValueError("The phase03 workbook is empty.")
 
@@ -146,6 +151,8 @@ def create_phase04_workbook(
             {"phase": "phase04", "input_rows": len(df.index), "input_columns": len(df.columns)},
         )
 
+    validation_progress = work_progress(progress_callback, 72, "Preparing phase04prediction", phase="phase04", unit="steps")
+    validation_progress(0, 1)
     target_column = str(initial_settings.get("target_column", "")).strip()
     if not target_column:
         raise ValueError("The selection definition must include a target column.")
@@ -185,6 +192,7 @@ def create_phase04_workbook(
         CANONICAL_HARVESTING_COLUMN,
     ])
 
+    validation_progress(1, 1, True)
     if progress_callback:
         progress_callback(
             76,
@@ -192,7 +200,7 @@ def create_phase04_workbook(
             "Cleaning numeric and categorical source values before model preparation.",
             {"phase": "phase04"},
         )
-    normalized_training_df = build_final_df(df.copy())
+    normalized_training_df = build_final_df(df.copy(), progress_callback=work_progress(progress_callback, 76, "Normalizing fields", phase="phase04", unit="steps"))
     standardized_training_df = normalized_training_df.copy()
 
     backfilled_dg_columns: list[str] = []
@@ -247,7 +255,9 @@ def create_phase04_workbook(
     standardized_numeric_columns: list[str] = []
     normalized_saved_stats = _normalize_saved_normalization_stats(normalization_overrides)
     normalization_stats: dict[str, dict[str, object]] = {}
-    for column in quantitative_and_nasa_columns:
+    numeric_progress = work_progress(progress_callback, 80, "Standardizing metrics", phase="phase04", unit="columns")
+    numeric_progress(0, len(quantitative_and_nasa_columns))
+    for column_index, column in enumerate(quantitative_and_nasa_columns, 1):
         numeric_series = clean_numeric_series(standardized_training_df[column].copy(), treat_dot_as_missing=True)
         saved_stats = normalized_saved_stats.get(column)
         apply_log = bool(saved_stats.get("apply_log")) if saved_stats is not None else should_apply_log(numeric_series)
@@ -278,6 +288,9 @@ def create_phase04_workbook(
             "zero_std_fallback": zero_std_fallback,
         }
 
+        numeric_progress(column_index, len(quantitative_and_nasa_columns))
+    numeric_progress(len(quantitative_and_nasa_columns), len(quantitative_and_nasa_columns), True)
+
     if progress_callback:
         progress_callback(
             84,
@@ -291,7 +304,9 @@ def create_phase04_workbook(
         )
     dummy_frames: list[pd.DataFrame] = []
     generated_dummy_columns: list[str] = []
-    for column in effective_categorical_columns:
+    category_progress = work_progress(progress_callback, 84, "Encoding categories", phase="phase04", unit="columns")
+    category_progress(0, len(effective_categorical_columns))
+    for column_index, column in enumerate(effective_categorical_columns, 1):
         normalized = standardized_training_df[column].apply(normalize_dummy_source_value)
         dummies = pd.get_dummies(normalized, prefix=column, dtype="Int64")
         if not dummies.empty:
@@ -301,6 +316,9 @@ def create_phase04_workbook(
                 dummies.loc[missing_mask, :] = pd.NA
             dummy_frames.append(dummies)
             generated_dummy_columns.extend([str(name) for name in dummies.columns])
+
+        category_progress(column_index, len(effective_categorical_columns))
+    category_progress(len(effective_categorical_columns), len(effective_categorical_columns), True)
 
     metadata_columns = [
         column for column in df.columns
@@ -333,9 +351,12 @@ def create_phase04_workbook(
             "Saving the traceability workbook and the model-ready normalized prediction input files.",
             {"phase": "phase04"},
         )
+    assembly_progress = work_progress(progress_callback, 88, "Writing phase04prediction", phase="phase04", unit="steps")
+    assembly_progress(0, 1)
     if dummy_frames:
         training_ready_df = pd.concat([training_ready_df.reset_index(drop=True), *(frame.reset_index(drop=True) for frame in dummy_frames)], axis=1)
 
+    assembly_progress(1, 1, True)
     output_headers = [str(column) for column in output_df.columns]
     serializable_output_df = output_df.astype(object).where(pd.notna(output_df), "")
     if stream_traceability_workbook:
@@ -344,18 +365,19 @@ def create_phase04_workbook(
             output_headers,
             serializable_output_df.itertuples(index=False, name=None),
             int(serializable_output_df.shape[0]),
+            progress_callback=work_progress(progress_callback, 88, "Writing phase04prediction workbook", phase="phase04"),
         )
     else:
         output_records = serializable_output_df.to_dict(orient="records")
-        phase01.write_xlsx(output_file, output_headers, output_records)
+        phase01.write_xlsx(output_file, output_headers, output_records, progress_callback=work_progress(progress_callback, 88, "Writing phase04prediction workbook", phase="phase04"))
     stem = output_file.stem
     selected_fields_csv = output_file.parent / f"{stem}_selected_fields.csv"
-    output_df.to_csv(selected_fields_csv, index=False)
+    write_dataframe_csv(output_df, selected_fields_csv, work_progress(progress_callback, 88, "Saving selected prediction fields CSV", phase="phase04"))
 
     training_csv = output_file.parent / f"{stem}_training_input.csv"
     training_xlsx = output_file.parent / f"{stem}_training_input.xlsx"
-    training_ready_df.to_csv(training_csv, index=False)
-    training_ready_df.to_excel(training_xlsx, index=False)
+    write_dataframe_csv(training_ready_df, training_csv, work_progress(progress_callback, 88, "Saving model-ready CSV", phase="phase04"))
+    write_dataframe_excel(training_ready_df, training_xlsx, work_progress(progress_callback, 88, "Saving model-ready workbook", phase="phase04", unit="cells"))
     resolved_normalization_stats_file = normalization_stats_file or output_file.parent / f"{stem}_normalization_stats.json"
     resolved_normalization_stats_file.parent.mkdir(parents=True, exist_ok=True)
     resolved_normalization_stats_file.write_text(

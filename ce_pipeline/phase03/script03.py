@@ -52,14 +52,17 @@ from config_env import resolve_runtime_root
 from preprocess import ea_pipeline, soil_enrichment
 from pipeline.nasa_country_region import build_manual_grid_cells
 from shared_cache import (
+    DAILY_CLIMATE_CACHE_VERSION,
     get_climate_feature_cache_entry,
     get_climate_feature_cache_entries,
+    get_daily_climate_cache_range,
     get_nasa_cache_entry,
     get_nasa_cache_entries,
     load_climate_feature_cache as load_shared_climate_feature_cache,
     resolve_shared_cache_db_path,
     save_climate_feature_cache as save_shared_climate_feature_cache,
     upsert_climate_feature_cache_entries,
+    upsert_daily_climate_cache_entries,
     upsert_nasa_cache_entries,
 )
 
@@ -199,6 +202,7 @@ _CHC_SERIES_AGGREGATION_CACHE: dict[int, dict[str, object]] = {}
 _CHC_WINDOW_METRICS_CACHE: dict[tuple[int, str, str], dict[str, float | None]] = {}
 _CHC_PIXEL_DAILY_SAMPLE_CACHE: dict[tuple[str, str, str], float | None] = {}
 _CHC_PREPARED_RASTER_PATHS: dict[tuple[str, str], Path] = {}
+_CHC_STRICT_PREPARED_RASTERS = False
 _INVALID_RASTER_PATHS_LOCK = Lock()
 _INVALID_RASTER_PATHS: set[Path] = set()
 _CHC_PARALLEL_PROGRESS_MODE = False
@@ -461,6 +465,14 @@ def resolve_phase03_worker_limit(kind: str, series_total: int) -> int:
     return max(1, min(default_limit, max(series_total, 1)))
 
 
+def resolve_phase03_daily_climate_cache_enabled() -> bool:
+    return str(os.environ.get("APP_PHASE03_DAILY_CLIMATE_CACHE_ENABLED", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def resolve_phase03_max_open_rasters() -> int:
     raw_value = str(os.environ.get("APP_PHASE03_MAX_OPEN_RASTERS", "")).strip()
     if not raw_value:
@@ -568,13 +580,20 @@ def deserialize_climate_series_key(serialized_key: str) -> tuple[str, str, str] 
 
 def build_climate_series_groups(
     rows: list[dict[str, str]],
+    progress_callback=None,
 ) -> tuple[dict[tuple[str, str, str], list[dict[str, str]]], list[tuple[str, str, str]]]:
     grouped_rows: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     row_series_keys: list[tuple[str, str, str]] = []
-    for row in rows:
+    if progress_callback:
+        progress_callback(0, len(rows))
+    for completed, row in enumerate(rows, 1):
         series_key = build_climate_series_key(row)
         row_series_keys.append(series_key)
         grouped_rows.setdefault(series_key, []).append(row)
+        if progress_callback:
+            progress_callback(completed, len(rows))
+    if progress_callback:
+        progress_callback(len(rows), len(rows), True)
     return grouped_rows, row_series_keys
 
 
@@ -587,13 +606,16 @@ def build_forecast_reference_precompute_series_items(
 
     seen_precompute_keys: set[tuple[str, str, str]] = set()
     precompute_series_items: list[tuple[tuple[str, str, str], dict[str, str]]] = []
+    reference_dates_by_pair = {}
     for series_key, row in series_items:
         pixel_id = series_key[0]
-        reference_pairs, _reference_planting_value, _reference_harvesting_value = ea_pipeline.resolve_climate_reference_dates(
-            row_planting_date=str(row.get("date_of_planting") or ""),
-            row_harvesting_date=str(row.get("date_of_harvesting") or ""),
-            climate_override=climate_override,
-        )
+        date_pair = (str(row.get("date_of_planting") or ""), str(row.get("date_of_harvesting") or ""))
+        if date_pair not in reference_dates_by_pair:
+            reference_dates_by_pair[date_pair] = ea_pipeline.resolve_climate_reference_dates(
+                row_planting_date=date_pair[0], row_harvesting_date=date_pair[1],
+                climate_override=climate_override,
+            )[0]
+        reference_pairs = reference_dates_by_pair[date_pair]
         if not reference_pairs:
             precompute_key = (pixel_id, series_key[1], series_key[2])
             if precompute_key in seen_precompute_keys:
@@ -615,6 +637,135 @@ def build_forecast_reference_precompute_series_items(
                 (precompute_key, precompute_row)
             )
     return precompute_series_items
+
+
+def is_valid_climate_feature_cache_payload(payload: object) -> bool:
+    return (
+        isinstance(payload, dict)
+        and isinstance(payload.get("output_row"), dict)
+        and isinstance(payload.get("audit_row"), dict)
+    )
+
+
+def collect_required_chc_date_bounds(
+    series_items: list[tuple[tuple[str, str, str], dict[str, str]]],
+) -> dict[str, tuple[date, date]]:
+    pixel_date_bounds: dict[str, tuple[date, date]] = {}
+    date_pair_bounds: dict[tuple[str, str], tuple[date, date]] = {}
+    for series_key, _row in series_items:
+        pixel_id = series_key[0]
+        pair = (series_key[1], series_key[2])
+        if pair not in date_pair_bounds:
+            planting_date = ea_pipeline.parse_iso_date(pair[0])
+            harvesting_date = ea_pipeline.parse_iso_date(pair[1])
+            planting_week_1, planting_week_2, harvest_back_windows, intermediate_window = (
+                ea_pipeline.build_climate_windows(planting_date, harvesting_date)
+            )
+            windows = [planting_week_1, planting_week_2]
+            windows.extend((start, end) for _, start, end in harvest_back_windows)
+            if intermediate_window is not None:
+                windows.append(intermediate_window)
+            date_pair_bounds[pair] = (min(start for start, _ in windows), max(end for _, end in windows))
+        start_date, end_date = date_pair_bounds[pair]
+        existing_bounds = pixel_date_bounds.get(pixel_id)
+        if existing_bounds is None:
+            pixel_date_bounds[pixel_id] = (start_date, end_date)
+        else:
+            pixel_date_bounds[pixel_id] = (
+                min(existing_bounds[0], start_date),
+                max(existing_bounds[1], end_date),
+            )
+    return pixel_date_bounds
+
+
+def collect_required_chc_dates_for_series_items(
+    series_items: list[tuple[tuple[str, str, str], dict[str, str]]],
+) -> dict[str, set[date]]:
+    return {
+        pixel_id: set(_iter_dates_inclusive(start_date, end_date))
+        for pixel_id, (start_date, end_date) in collect_required_chc_date_bounds(series_items).items()
+    }
+
+
+def plan_chc_precompute_series_and_raster_dates(
+    missing_feature_series_items: list[tuple[tuple[str, str, str], dict[str, str]]],
+    climate_override: dict[str, object] | None,
+    *,
+    daily_climate_cache_enabled: bool,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[list[tuple[tuple[str, str, str], dict[str, str]]], list[date]]:
+    precompute_series_items = build_forecast_reference_precompute_series_items(
+        missing_feature_series_items,
+        climate_override,
+    )
+    if precompute_series_items:
+        nasa_cache_keys: list[tuple[str, str, str, str]] = []
+        nasa_cache_key_by_series: dict[tuple[str, str, str], tuple[str, str, str, str]] = {}
+        for series_key, row in precompute_series_items:
+            latitude = float(row["latitude"])
+            longitude = float(row["longitude"])
+            _pixel_id, pixel_center_latitude, pixel_center_longitude = resolve_chc_pixel_metadata(
+                latitude,
+                longitude,
+            )
+            cache_key = _build_chc_cache_key(
+                pixel_center_latitude,
+                pixel_center_longitude,
+                ea_pipeline.parse_iso_date(series_key[1]),
+                ea_pipeline.parse_iso_date(series_key[2]),
+            )
+            nasa_cache_keys.append(cache_key)
+            nasa_cache_key_by_series[series_key] = cache_key
+        # Only retain membership, rather than all daily JSON payloads for a
+        # continental grid. Each lookup releases its payloads before the next.
+        cached_nasa_keys = set()
+        for index in range(0, len(nasa_cache_keys), 128):
+            cached_nasa_keys.update(get_nasa_cache_entries(nasa_cache_keys[index:index + 128], touch_access=False))
+        precompute_series_items = [
+            item
+            for item in precompute_series_items
+            if nasa_cache_key_by_series[item[0]] not in cached_nasa_keys
+        ]
+
+    pixel_date_bounds = collect_required_chc_date_bounds(precompute_series_items)
+    if not daily_climate_cache_enabled or not pixel_date_bounds:
+        all_required_dates = {
+            current_date
+            for start_date, end_date in set(pixel_date_bounds.values())
+            for current_date in _iter_dates_inclusive(start_date, end_date)
+        }
+        return precompute_series_items, sorted(all_required_dates)
+
+    raster_dates: set[date] = set()
+    last_report = 0.0
+    fully_required_ranges: set[tuple[date, date]] = set()
+    for pixel_index, (pixel_id, (start_date, end_date)) in enumerate(pixel_date_bounds.items(), 1):
+        date_range = (start_date, end_date)
+        # Once another pixel requires every date in this range, inspecting more
+        # pixels cannot add a raster date. Their daily values are still reused
+        # individually during extraction.
+        if date_range not in fully_required_ranges:
+            cached_entries = get_daily_climate_cache_range(
+                pixel_id, start_date.isoformat(), end_date.isoformat(),
+                cache_version=DAILY_CLIMATE_CACHE_VERSION,
+            )
+            cached_dates = {
+                date.fromisoformat(observation_date)
+                for cached_pixel_id, observation_date, cache_version in cached_entries
+                if cached_pixel_id == pixel_id and cache_version == DAILY_CLIMATE_CACHE_VERSION
+            }
+            raster_dates.update(day for day in _iter_dates_inclusive(start_date, end_date) if day not in cached_dates)
+            if all(day in raster_dates for day in _iter_dates_inclusive(start_date, end_date)):
+                fully_required_ranges.add(date_range)
+        now = time.monotonic()
+        if progress_callback is not None and (now-last_report >= 2 or pixel_index == len(pixel_date_bounds)):
+            progress_callback(
+                23, "Planning climate cache and raster reads",
+                f"Checked daily climate cache for {pixel_index}/{len(pixel_date_bounds)} pixels; {len(raster_dates)} dates need local rasters.",
+                {"phase": "phase03", "climate_pixels_planned": pixel_index, "climate_pixels_total": len(pixel_date_bounds)},
+            )
+            last_report = now
+    return precompute_series_items, sorted(raster_dates)
 
 
 def _normalize_feature_cache_entry(
@@ -1014,10 +1165,59 @@ def _resolve_raster_path(dataset: str, current_date: date, cache_dir: Path) -> t
     return target_path, downloaded
 
 
+def _validate_chc_raster_file(path: Path, *, dataset: str, current_date: date) -> None:
+    try:
+        if resolve_phase03_raster_backend() == "rasterio":
+            if rasterio is None or Window is None:
+                raise RuntimeError("Rasterio validation backend is unavailable.")
+            with rasterio.open(path) as raster:
+                if raster.count < 1 or raster.width < 1 or raster.height < 1:
+                    raise ValueError("Raster has no readable bands or pixels.")
+                transform = raster.transform
+                if (
+                    not transform
+                    or not math.isfinite(float(transform.a))
+                    or not math.isfinite(float(transform.e))
+                    or transform.a == 0
+                    or transform.e == 0
+                ):
+                    raise ValueError("Raster has an invalid geospatial transform.")
+                raster.read(1, window=Window(0, 0, 1, 1), masked=False)
+        else:
+            with Image.open(path) as image:
+                if image.format != "TIFF" or image.width < 1 or image.height < 1:
+                    raise ValueError("File is not a non-empty TIFF raster.")
+                tags = getattr(image, "tag_v2", {})
+                pixel_scale = tags.get(33550)
+                tie_point = tags.get(33922)
+                if not pixel_scale or not tie_point or len(pixel_scale) < 2 or len(tie_point) < 6:
+                    raise ValueError("GeoTIFF scale or tie-point metadata is missing.")
+                x_scale = float(pixel_scale[0])
+                y_scale = float(pixel_scale[1])
+                if (
+                    not math.isfinite(x_scale)
+                    or not math.isfinite(y_scale)
+                    or x_scale == 0
+                    or y_scale == 0
+                ):
+                    raise ValueError("GeoTIFF pixel scale is invalid.")
+                image.verify()
+    except Exception as error:
+        raise RuntimeError(
+            f"Invalid CHC climate raster for {dataset} on {current_date.isoformat()}: {path}"
+        ) from error
+
+
 def _resolve_prepared_raster_path(dataset: str, current_date: date, cache_dir: Path) -> Path:
     prepared = _CHC_PREPARED_RASTER_PATHS.get((dataset, current_date.isoformat()))
     if prepared is not None and prepared.exists():
         return prepared
+    if _CHC_STRICT_PREPARED_RASTERS:
+        expected_path, _url = _resolve_raster_request(dataset, current_date, cache_dir)
+        raise RuntimeError(
+            "Prepared climate raster is missing during strict Phase03 computation; "
+            f"prefetch/repair was incomplete for {dataset} on {current_date.isoformat()}: {expected_path}"
+        )
     target_path, _ = _resolve_raster_path(dataset, current_date, cache_dir)
     _CHC_PREPARED_RASTER_PATHS[(dataset, current_date.isoformat())] = target_path
     return target_path
@@ -1260,6 +1460,11 @@ def _sample_chc_dataset_value(
     except Exception as exc:
         if not _should_retry_invalid_raster(exc):
             raise
+        if _CHC_STRICT_PREPARED_RASTERS:
+            raise RuntimeError(
+                "Prepared climate raster failed validation during strict Phase03 computation; "
+                f"the prefetch stage must repair {dataset} on {current_date.isoformat()} before workers start: {path}"
+            ) from exc
         append_phase03_debug_log(
             get_thread_climate_debug_file(),
             "serial_series_dataset_sample_retry_invalid_raster",
@@ -1300,6 +1505,8 @@ def _sample_chc_dataset_value(
         )
     with _CHC_PIXEL_DAILY_SAMPLE_CACHE_LOCK:
         _CHC_PIXEL_DAILY_SAMPLE_CACHE[cache_key] = value
+        while len(_CHC_PIXEL_DAILY_SAMPLE_CACHE) > 8192:
+            del _CHC_PIXEL_DAILY_SAMPLE_CACHE[next(iter(_CHC_PIXEL_DAILY_SAMPLE_CACHE))]
     append_phase03_debug_log(
         get_thread_climate_debug_file(),
         "serial_series_dataset_sample_completed",
@@ -1353,7 +1560,7 @@ def build_chc_series_aggregation_cache(
 ) -> dict[str, object]:
     cache_key = id(nasa_series)
     cached = _CHC_SERIES_AGGREGATION_CACHE.get(cache_key)
-    if cached is not None:
+    if cached is not None and cached.get("source_series") is nasa_series:
         return cached
 
     keys = sorted(set(nasa_series.get("T2M", {}).keys()) | set(nasa_series.get("PRECTOTCORR", {}).keys()))
@@ -1378,12 +1585,25 @@ def build_chc_series_aggregation_cache(
         precipitation_prefix_sum.append(running_precipitation_sum)
 
     prepared = {
+        "source_series": nasa_series,
         "key_to_index": key_to_index,
         "temperature_prefix_sum": temperature_prefix_sum,
         "temperature_prefix_count": temperature_prefix_count,
         "precipitation_prefix_sum": precipitation_prefix_sum,
     }
-    _CHC_SERIES_AGGREGATION_CACHE[cache_key] = prepared
+    with _CHC_CACHE_LOCK:
+        # Entries can outlive their aggregation cache during concurrent work.
+        # Drop any old windows before a released object's id can be reused.
+        for window_key in list(_CHC_WINDOW_METRICS_CACHE):
+            if window_key[0] == cache_key:
+                del _CHC_WINDOW_METRICS_CACHE[window_key]
+        _CHC_SERIES_AGGREGATION_CACHE[cache_key] = prepared
+        while len(_CHC_SERIES_AGGREGATION_CACHE) > 128:
+            evicted = next(iter(_CHC_SERIES_AGGREGATION_CACHE))
+            del _CHC_SERIES_AGGREGATION_CACHE[evicted]
+            for window_key in list(_CHC_WINDOW_METRICS_CACHE):
+                if window_key[0] == evicted:
+                    del _CHC_WINDOW_METRICS_CACHE[window_key]
     return prepared
 
 
@@ -1400,18 +1620,33 @@ def aggregate_metrics_fast(
         start_date.isoformat(),
         end_date.isoformat(),
     )
+    prepared = build_chc_series_aggregation_cache(nasa_series)
     cached_window_metrics = _CHC_WINDOW_METRICS_CACHE.get(window_cache_key)
     if cached_window_metrics is not None:
         return cached_window_metrics
 
-    prepared = build_chc_series_aggregation_cache(nasa_series)
     key_to_index = prepared["key_to_index"]
     start_key = ea_pipeline.format_nasa_date(start_date)
     end_key = ea_pipeline.format_nasa_date(end_date)
     start_index = key_to_index.get(start_key)
     end_index = key_to_index.get(end_key)
     if start_index is None or end_index is None or end_index < start_index:
-        fallback_metrics = ea_pipeline.aggregate_metrics(nasa_series, start_date, end_date)
+        temperatures: list[float] = []
+        precipitations: list[float] = []
+        temperature_series = nasa_series.get("T2M", {})
+        precipitation_series = nasa_series.get("PRECTOTCORR", {})
+        for current_date in ea_pipeline.daterange(start_date, end_date):
+            date_key = ea_pipeline.format_nasa_date(current_date)
+            temperature = temperature_series.get(date_key)
+            precipitation = precipitation_series.get(date_key)
+            if temperature is not None:
+                temperatures.append(temperature)
+            if precipitation is not None:
+                precipitations.append(precipitation)
+        fallback_metrics = {
+            "avg_t2m": sum(temperatures) / len(temperatures) if temperatures else None,
+            "total_prectotcorr": sum(precipitations),
+        }
         _CHC_WINDOW_METRICS_CACHE[window_cache_key] = fallback_metrics
         return fallback_metrics
 
@@ -1489,9 +1724,19 @@ def prefetch_chc_rasters(
     progress_callback: ProgressCallback | None = None,
     skip_soil_enrichment: bool = False,
     max_workers: int = 6,
-) -> dict[str, int]:
+) -> dict[str, object]:
+    prefetch_started_at = time.monotonic()
     if not required_dates:
-        return {"task_total": 0, "downloaded": 0, "cached": 0, "prepared_raster_paths": {}}
+        return {
+            "task_total": 0,
+            "downloaded": 0,
+            "cached": 0,
+            "prepared_raster_paths": {},
+            "elapsed_seconds": 0.0,
+            "raster_resolve_seconds": 0.0,
+            "raster_validation_seconds": 0.0,
+            "download_resolution_seconds": 0.0,
+        }
 
     cache_dir = resolve_shared_chc_cache_dir()
     task_specs: list[tuple[str, date]] = []
@@ -1503,14 +1748,50 @@ def prefetch_chc_rasters(
     total_tasks = len(task_specs)
     completed_tasks = 0
     downloaded_tasks = 0
+    raster_resolve_seconds = 0.0
+    raster_validation_seconds = 0.0
+    download_resolution_seconds = 0.0
     prepared_raster_paths: dict[tuple[str, str], Path] = {}
 
-    def resolve_task(dataset: str, current_date: date) -> tuple[Path, bool]:
-        target_path, url = _resolve_raster_request(dataset, current_date, cache_dir)
-        if target_path.exists():
-            return target_path, False
-        _download_with_retries(url, target_path)
-        return target_path, True
+    def resolve_task(dataset: str, current_date: date) -> tuple[Path, bool, float, float]:
+        resolve_started_at = time.monotonic()
+        target_path, downloaded = _resolve_raster_path(dataset, current_date, cache_dir)
+        resolve_seconds = max(0.0, time.monotonic() - resolve_started_at)
+        validation_seconds = 0.0
+        validation_started_at = time.monotonic()
+        try:
+            _validate_chc_raster_file(target_path, dataset=dataset, current_date=current_date)
+            validation_seconds += max(0.0, time.monotonic() - validation_started_at)
+            return target_path, downloaded, resolve_seconds, validation_seconds
+        except RuntimeError as validation_error:
+            validation_seconds += max(0.0, time.monotonic() - validation_started_at)
+            _invalidate_and_remove_raster(
+                target_path,
+                dataset=dataset,
+                current_date=current_date,
+                reason=validation_error,
+            )
+
+        repair_resolve_started_at = time.monotonic()
+        repaired_path, repaired_downloaded = _resolve_raster_path(dataset, current_date, cache_dir)
+        resolve_seconds += max(0.0, time.monotonic() - repair_resolve_started_at)
+        validation_started_at = time.monotonic()
+        try:
+            _validate_chc_raster_file(repaired_path, dataset=dataset, current_date=current_date)
+            validation_seconds += max(0.0, time.monotonic() - validation_started_at)
+        except RuntimeError as repair_error:
+            validation_seconds += max(0.0, time.monotonic() - validation_started_at)
+            _invalidate_and_remove_raster(
+                repaired_path,
+                dataset=dataset,
+                current_date=current_date,
+                reason=repair_error,
+            )
+            raise RuntimeError(
+                "CHC raster remained invalid after one prefetch repair attempt for "
+                f"{dataset} on {current_date.isoformat()}: {repaired_path}"
+            ) from repair_error
+        return repaired_path, downloaded or repaired_downloaded, resolve_seconds, validation_seconds
 
     configured_workers = resolve_phase03_worker_limit("prefetch", total_tasks)
     worker_count = max(1, min(max_workers, configured_workers, total_tasks))
@@ -1518,45 +1799,58 @@ def prefetch_chc_rasters(
         future_map = {executor.submit(resolve_task, dataset, current_date): (dataset, current_date) for dataset, current_date in task_specs}
         for future in as_completed(future_map):
             dataset, current_date = future_map[future]
-            target_path, downloaded = future.result()
+            target_path, downloaded, task_resolve_seconds, task_validation_seconds = future.result()
             prepared_raster_paths[(dataset, current_date.isoformat())] = target_path
             completed_tasks += 1
+            raster_resolve_seconds += task_resolve_seconds
+            raster_validation_seconds += task_validation_seconds
             if downloaded:
                 downloaded_tasks += 1
+                download_resolution_seconds += task_resolve_seconds
             overall_fraction = completed_tasks / total_tasks
             overall_percent = round(15 + (overall_fraction * 17), 1)
             cached_tasks = completed_tasks - downloaded_tasks
+            elapsed_seconds = max(0.0, time.monotonic() - prefetch_started_at)
+            files_per_second = completed_tasks / elapsed_seconds if elapsed_seconds > 0 else 0.0
+            remaining_tasks = max(total_tasks - completed_tasks, 0)
+            eta_seconds = remaining_tasks / files_per_second if files_per_second > 0 else None
             message = (
                 f"Preparing CHIRPS/CHIRTS-daily rasters for phase03: {completed_tasks}/{total_tasks} files checked "
-                f"({round(overall_fraction * 100)}%). Downloaded now: {downloaded_tasks}. Already cached: {cached_tasks}."
+                f"({round(overall_fraction * 100)}%). Downloaded now: {downloaded_tasks}. Already cached: {cached_tasks}. "
+                f"Rate: {files_per_second:.2f} files/s. "
+                f"ETA: {round(eta_seconds)}s."
+                if eta_seconds is not None
+                else f"Preparing CHIRPS/CHIRTS-daily rasters for phase03: {completed_tasks}/{total_tasks} files checked "
+                f"({round(overall_fraction * 100)}%). Downloaded now: {downloaded_tasks}. Already cached: {cached_tasks}. "
+                f"Rate: {files_per_second:.2f} files/s."
             )
+            progress_details = {
+                "phase": "phase03",
+                "climate_prefetch_tasks_completed": completed_tasks,
+                "climate_prefetch_tasks_total": total_tasks,
+                "climate_prefetch_downloaded": downloaded_tasks,
+                "climate_prefetch_cached": cached_tasks,
+                "climate_prefetch_files_per_second": round(files_per_second, 3),
+                "climate_prefetch_eta_seconds": round(eta_seconds, 1) if eta_seconds is not None else None,
+                "climate_prefetch_elapsed_seconds": round(elapsed_seconds, 3),
+                "climate_prefetch_raster_resolve_seconds": round(raster_resolve_seconds, 3),
+                "climate_prefetch_raster_validation_seconds": round(raster_validation_seconds, 3),
+                "climate_prefetch_download_resolution_seconds": round(download_resolution_seconds, 3),
+                "soil_skipped": skip_soil_enrichment,
+            }
             write_progress(
                 progress_file,
                 percent=overall_percent,
                 stage="Preparing climate rasters",
                 message=message,
-                details={
-                    "phase": "phase03",
-                    "climate_prefetch_tasks_completed": completed_tasks,
-                    "climate_prefetch_tasks_total": total_tasks,
-                    "climate_prefetch_downloaded": downloaded_tasks,
-                    "climate_prefetch_cached": cached_tasks,
-                    "soil_skipped": skip_soil_enrichment,
-                },
+                details=progress_details,
             )
             if progress_callback:
                 progress_callback(
                     overall_percent,
                     "Preparing climate rasters",
                     message,
-                    {
-                        "phase": "phase03",
-                        "climate_prefetch_tasks_completed": completed_tasks,
-                        "climate_prefetch_tasks_total": total_tasks,
-                        "climate_prefetch_downloaded": downloaded_tasks,
-                        "climate_prefetch_cached": cached_tasks,
-                        "soil_skipped": skip_soil_enrichment,
-                    },
+                    progress_details,
                 )
 
     return {
@@ -1564,6 +1858,10 @@ def prefetch_chc_rasters(
         "downloaded": downloaded_tasks,
         "cached": total_tasks - downloaded_tasks,
         "prepared_raster_paths": prepared_raster_paths,
+        "elapsed_seconds": round(max(0.0, time.monotonic() - prefetch_started_at), 3),
+        "raster_resolve_seconds": round(raster_resolve_seconds, 3),
+        "raster_validation_seconds": round(raster_validation_seconds, 3),
+        "download_resolution_seconds": round(download_resolution_seconds, 3),
     }
 
 
@@ -1697,7 +1995,7 @@ def _resolve_daily_raster_paths(
     current_date: date,
     cache_dir: Path,
 ) -> tuple[dict[str, Path], dict[str, bool]]:
-    if _CHC_PREPARED_RASTER_PATHS:
+    if _CHC_PREPARED_RASTER_PATHS or _CHC_STRICT_PREPARED_RASTERS:
         set_thread_climate_debug_context(
             current_date=current_date.isoformat(),
             current_dataset="prepared_raster_paths",
@@ -1770,10 +2068,15 @@ def _build_daily_raster_plan(
     start_date: date,
     end_date: date,
     cache_dir: Path,
+    required_dates: list[date] | None = None,
 ) -> list[tuple[date, dict[str, Path]]]:
     daily_plan: list[tuple[date, dict[str, Path]]] = []
-    current_date = start_date
-    while current_date <= end_date:
+    dates_to_resolve = required_dates
+    if dates_to_resolve is None:
+        dates_to_resolve = list(_iter_dates_inclusive(start_date, end_date))
+    for current_date in dates_to_resolve:
+        if current_date < start_date or current_date > end_date:
+            continue
         set_thread_climate_debug_context(
             current_date=current_date.isoformat(),
             current_dataset="resolve_daily_raster_paths",
@@ -1807,7 +2110,6 @@ def _build_daily_raster_plan(
             },
         )
         daily_plan.append((current_date, raster_paths))
-        current_date += timedelta(days=1)
     return daily_plan
 
 
@@ -1873,7 +2175,21 @@ def _build_chc_daily_values_for_pixel(
     daily_raster_plan: list[tuple[date, dict[str, Path]]] | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
     cache_dir = resolve_shared_chc_cache_dir()
+    daily_cache_enabled = resolve_phase03_daily_climate_cache_enabled()
     daily_values: dict[str, tuple[float | None, float | None]] = {}
+    if daily_cache_enabled:
+        cached_daily_entries = get_daily_climate_cache_range(
+            pixel_id,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            cache_version=DAILY_CLIMATE_CACHE_VERSION,
+        )
+        for (_cached_pixel_id, observation_date, _cache_version), values in cached_daily_entries.items():
+            daily_values[ea_pipeline.format_nasa_date(date.fromisoformat(observation_date))] = (
+                values["T2M"],
+                values["PRECTOTCORR"],
+            )
+
     set_thread_climate_debug_context(
         pixel_id=pixel_id,
         latitude=round(latitude, 6),
@@ -1887,17 +2203,42 @@ def _build_chc_daily_values_for_pixel(
     )
     processed_days = 0
     total_days = max((end_date - start_date).days + 1, 1)
-    if daily_raster_plan is None:
+    missing_dates = [
+        current_date
+        for current_date in _iter_dates_inclusive(start_date, end_date)
+        if ea_pipeline.format_nasa_date(current_date) not in daily_values
+    ]
+    missing_date_set = set(missing_dates)
+    if daily_raster_plan is None and missing_dates:
         daily_raster_plan = _build_daily_raster_plan(
             start_date=start_date,
             end_date=end_date,
             cache_dir=cache_dir,
+            required_dates=missing_dates,
         )
+    elif daily_raster_plan is None:
+        daily_raster_plan = []
+    else:
+        planned_dates = {current_date for current_date, _raster_paths in daily_raster_plan}
+        unresolved_dates = [current_date for current_date in missing_dates if current_date not in planned_dates]
+        if unresolved_dates:
+            daily_raster_plan = [
+                *daily_raster_plan,
+                *_build_daily_raster_plan(
+                    start_date=start_date,
+                    end_date=end_date,
+                    cache_dir=cache_dir,
+                    required_dates=unresolved_dates,
+                ),
+            ]
+    new_daily_entries: dict[tuple[str, str, int], dict[str, float | None]] = {}
     try:
         for current_date, raster_paths in daily_raster_plan:
+            if current_date not in missing_date_set:
+                continue
             set_thread_climate_debug_context(
                 current_date=current_date.isoformat(),
-                processed_days=processed_days,
+                processed_days=(current_date - start_date).days,
             )
             append_phase03_debug_log(
                 get_thread_climate_debug_file(),
@@ -1924,7 +2265,12 @@ def _build_chc_daily_values_for_pixel(
                 raster_paths=raster_paths,
             )
             daily_values[ea_pipeline.format_nasa_date(current_date)] = (temperature, precip)
-            processed_days += 1
+            if daily_cache_enabled:
+                new_daily_entries[(pixel_id, current_date.isoformat(), DAILY_CLIMATE_CACHE_VERSION)] = {
+                    "T2M": temperature,
+                    "PRECTOTCORR": precip,
+                }
+            processed_days = (current_date - start_date).days + 1
             if progress_callback is not None and (
                 processed_days == 1
                 or processed_days % 7 == 0
@@ -1939,6 +2285,10 @@ def _build_chc_daily_values_for_pixel(
                     "day_index": processed_days,
                 },
             )
+        if daily_cache_enabled and new_daily_entries:
+            upsert_daily_climate_cache_entries(new_daily_entries)
+        if progress_callback is not None:
+            progress_callback(total_days, total_days)
         return daily_values
     finally:
         clear_thread_climate_debug_context()
@@ -1961,6 +2311,198 @@ def _materialize_nasa_series_from_daily_values(
     return result
 
 
+def _sample_raster_pixel_batch(
+    path: Path, dataset: str, pixels: dict[str, tuple[float, float]],
+) -> dict[str, float | None]:
+    """Read each native raster block once, using the scalar path's indices/rules."""
+    fill_value = CHIRPS_FILL_VALUE if dataset == "chirps" else CHIRTS_FILL_VALUE
+    latitude_min = CHIRPS_MIN_LATITUDE if dataset == "chirps" else CHIRTS_MIN_LATITUDE
+    latitude_max = CHIRPS_MAX_LATITUDE if dataset == "chirps" else CHIRTS_MAX_LATITUDE
+    values = {pixel_id: None for pixel_id in pixels}
+    entry = _get_raster_cache_entry(path)
+    raster = entry.get("dataset")
+    if entry.get("backend") != "rasterio" or raster is None:
+        return {
+            pixel_id: _sample_raster_value(
+                path, dataset=dataset, pixel_id=pixel_id, latitude=latitude,
+                longitude=longitude, fill_value=fill_value,
+                latitude_min=latitude_min, latitude_max=latitude_max,
+            )
+            for pixel_id, (latitude, longitude) in pixels.items()
+        }
+    block_height, block_width = raster.block_shapes[0]
+    blocks: dict[tuple[int, int], list[tuple[str, int, int]]] = defaultdict(list)
+    for pixel_id, (latitude, longitude) in pixels.items():
+        indices = _resolve_raster_pixel_indices(
+            path, dataset=dataset, pixel_id=pixel_id, latitude=latitude,
+            longitude=longitude, latitude_min=latitude_min, latitude_max=latitude_max,
+        )
+        if indices is not None:
+            col, row = indices
+            blocks[(row // block_height, col // block_width)].append((pixel_id, row, col))
+    for (block_row, block_col), points in blocks.items():
+        # Crop within the native block. This also avoids reading a full-width
+        # strip when only a small cluster of columns is requested.
+        row_min = min(row for _, row, _ in points)
+        row_max = max(row for _, row, _ in points)
+        col_min = min(col for _, _, col in points)
+        col_max = max(col for _, _, col in points)
+        data = raster.read(1, window=Window(col_min, row_min, col_max-col_min+1, row_max-row_min+1), masked=False)
+        for pixel_id, row, col in points:
+            numeric = float(data[row-row_min, col-col_min])
+            values[pixel_id] = None if numeric == fill_value or math.isnan(numeric) else numeric
+    return values
+
+
+def _precompute_chc_series_by_date(
+    series_items, cache, *, worker_count: int, debug_file: Path | None,
+) -> dict[str, int]:
+    """Bound pixels in flight and traverse dates once per pixel batch."""
+    grouped = defaultdict(list)
+    for series_key, row in series_items:
+        grouped[series_key[0]].append((series_key, row))
+    bounds = collect_required_chc_date_bounds(series_items)
+    stats = {"pixel_groups": len(grouped), "series_total": len(series_items),
+             "series_from_local_cache": 0, "series_from_shared_cache": 0, "series_materialized": 0}
+    # A shared immutable plan resolves each date/source once for all batches.
+    days = sorted({day for start, end in set(bounds.values()) for day in _iter_dates_inclusive(start, end)})
+    # Some days can be exclusively in the durable daily cache, so resolve paths
+    # lazily, only for days a batch actually needs.
+    raster_plans: dict[date, dict[str, Path]] = {}
+    plan_lock = Lock()
+    retain_series = len(series_items) <= 512
+
+    def prepare_batch(pixel_ids):
+        register_precompute_climate_worker(f"batch:{pixel_ids[0]}")
+        set_thread_climate_debug_context(debug_file=str(debug_file) if debug_file is not None else "", pixel_batch_size=len(pixel_ids),
+                                        total_days=len(days), processed_days=0)
+        try:
+            local_stats = {"series_from_local_cache": 0, "series_from_shared_cache": 0, "series_materialized": 0}
+            pending = {}
+            coordinates = {}
+            for pixel_id in pixel_ids:
+                row = grouped[pixel_id][0][1]
+                latitude, longitude = float(row["latitude"]), float(row["longitude"])
+                resolved, center_lat, center_lon = resolve_chc_pixel_metadata(latitude, longitude)
+                if resolved != pixel_id:
+                    raise ValueError(f"Pixel mismatch: expected {pixel_id}, got {resolved}")
+                coordinates[pixel_id] = (latitude, longitude)
+                for series_key, _ in grouped[pixel_id]:
+                    key = _build_chc_cache_key(center_lat, center_lon, date.fromisoformat(series_key[1]), date.fromisoformat(series_key[2]))
+                    with _CHC_CACHE_LOCK:
+                        in_memory = key in cache
+                    if in_memory:
+                        local_stats["series_from_local_cache"] += 1
+                    else:
+                        pending[key] = pixel_id
+            shared = get_nasa_cache_entries(list(pending), touch_access=False) if pending else {}
+            local_stats["series_from_shared_cache"] += len(shared)
+            if retain_series:
+                with _CHC_CACHE_LOCK:
+                    cache.update(shared)
+            pending = {key: pixel_id for key, pixel_id in pending.items() if key not in shared}
+            del shared
+            daily_values = {}
+            for pixel_id in set(pending.values()):
+                start, end = bounds[pixel_id]
+                stored = get_daily_climate_cache_range(pixel_id, start.isoformat(), end.isoformat(), cache_version=DAILY_CLIMATE_CACHE_VERSION)
+                daily_values[pixel_id] = {
+                    ea_pipeline.format_nasa_date(date.fromisoformat(observation)): (v["T2M"], v["PRECTOTCORR"])
+                    for (_, observation, _), v in stored.items()
+                }
+            new_entries = {}
+            for day_index, current_date in enumerate(days, 1):
+                date_key = ea_pipeline.format_nasa_date(current_date)
+                missing_pixels = {
+                    pixel_id: coordinates[pixel_id] for pixel_id, values in daily_values.items()
+                    if bounds[pixel_id][0] <= current_date <= bounds[pixel_id][1] and date_key not in values
+                }
+                if missing_pixels:
+                    with plan_lock:
+                        if current_date not in raster_plans:
+                            raster_plans[current_date] = _resolve_daily_raster_paths(current_date, resolve_shared_chc_cache_dir())[0]
+                        paths = raster_plans[current_date]
+                    sampled = {}
+                    for dataset in ("chirps", "chirts_tmax", "chirts_tmin"):
+                        set_thread_climate_debug_context(current_dataset=dataset, current_date=current_date.isoformat(),
+                                                        current_raster_path=str(paths[dataset]), processed_days=day_index)
+                        try:
+                            sampled[dataset] = _sample_raster_pixel_batch(paths[dataset], dataset, missing_pixels)
+                        except Exception as exc:
+                            if not _should_retry_invalid_raster(exc):
+                                raise
+                            # Keep the established strict-error/repair contract.
+                            sampled[dataset] = {
+                                pixel_id: _sample_chc_dataset_value(
+                                    dataset, paths[dataset], pixel_id=pixel_id, current_date=current_date,
+                                    latitude=lat, longitude=lon,
+                                    fill_value=CHIRPS_FILL_VALUE if dataset == "chirps" else CHIRTS_FILL_VALUE,
+                                    latitude_min=CHIRPS_MIN_LATITUDE if dataset == "chirps" else CHIRTS_MIN_LATITUDE,
+                                    latitude_max=CHIRPS_MAX_LATITUDE if dataset == "chirps" else CHIRTS_MAX_LATITUDE,
+                                ) for pixel_id, (lat, lon) in missing_pixels.items()
+                            }
+                    for pixel_id in missing_pixels:
+                        tmax, tmin = sampled["chirts_tmax"][pixel_id], sampled["chirts_tmin"][pixel_id]
+                        temperature = (tmax+tmin)/2.0 if tmax is not None and tmin is not None else tmax if tmax is not None else tmin
+                        precipitation = sampled["chirps"][pixel_id]
+                        daily_values[pixel_id][date_key] = (temperature, precipitation)
+                        new_entries[(pixel_id, current_date.isoformat(), DAILY_CLIMATE_CACHE_VERSION)] = {"T2M": temperature, "PRECTOTCORR": precipitation}
+                    if len(new_entries) >= 4096:
+                        upsert_daily_climate_cache_entries(new_entries)
+                        new_entries.clear()
+                if day_index % 7 == 0:
+                    report_parallel_series_progress("__batch_heartbeat__", day_index, len(days))
+            if new_entries:
+                upsert_daily_climate_cache_entries(new_entries)
+            materialized = {
+                key: _materialize_nasa_series_from_daily_values(daily_values[pixel_id], start_date=date.fromisoformat(key[2]), end_date=date.fromisoformat(key[3]))
+                for key, pixel_id in pending.items()
+            }
+            if materialized:
+                upsert_nasa_cache_entries(materialized)
+                if retain_series:
+                    with _CHC_CACHE_LOCK:
+                        cache.update(materialized)
+            local_stats["series_materialized"] = len(materialized)
+            for pixel_id in pixel_ids:
+                lat, lon = coordinates[pixel_id]
+                _, center_lat, center_lon = resolve_chc_pixel_metadata(lat, lon)
+                for series_key, _ in grouped[pixel_id]:
+                    key = _build_chc_cache_key(center_lat, center_lon, date.fromisoformat(series_key[1]), date.fromisoformat(series_key[2]))
+                    report_parallel_series_progress(_build_series_identifier(key), 1, 1, completed=True)
+            return local_stats
+        finally:
+            _clear_thread_raster_image_cache()
+            unregister_active_climate_worker()
+            clear_thread_climate_debug_context()
+
+    pixel_queue = iter(sorted(grouped))
+    def next_batch():
+        from itertools import islice
+        return list(islice(pixel_queue, 128))
+    with ThreadPoolExecutor(max_workers=max(1, worker_count)) as executor:
+        pending_futures = set()
+        exhausted = False
+        while pending_futures or not exhausted:
+            while len(pending_futures) < max(1, worker_count) and not exhausted:
+                batch = next_batch()
+                if not batch:
+                    exhausted = True
+                    break
+                pending_futures.add(executor.submit(prepare_batch, batch))
+            if not pending_futures:
+                break
+            done, _ = wait(pending_futures, timeout=5, return_when=FIRST_COMPLETED)
+            for future in done:
+                pending_futures.remove(future)
+                for key, value in future.result().items():
+                    stats[key] += value
+            update_parallel_progress_diagnostics(climate_pending_series_count=len(pending_futures),
+                                                 climate_active_worker_sample=get_active_climate_worker_snapshots()[:5])
+            report_parallel_series_progress("__batch_heartbeat__", 0, 1)
+    return stats
+
+
 def precompute_chc_series_batches(
     series_items: list[tuple[tuple[str, str, str], dict[str, str]]],
     cache: dict[tuple[str, str, str, str], dict[str, dict[str, float | None]]],
@@ -1976,6 +2518,9 @@ def precompute_chc_series_batches(
             "series_from_shared_cache": 0,
             "series_materialized": 0,
         }
+
+    if resolve_phase03_daily_climate_cache_enabled() and resolve_phase03_raster_backend() == "rasterio" and len({key[0] for key, _ in series_items}) > 1:
+        return _precompute_chc_series_by_date(series_items, cache, worker_count=worker_count, debug_file=debug_file)
 
     grouped_by_pixel: dict[str, list[tuple[tuple[str, str, str], dict[str, str]]]] = defaultdict(list)
     for series_key, row in series_items:
@@ -2007,7 +2552,7 @@ def precompute_chc_series_batches(
                 pixel_center_latitude=pixel_center_latitude,
                 pixel_center_longitude=pixel_center_longitude,
                 pixel_series_count=len(pixel_series_items),
-                debug_file=str(debug_file),
+                debug_file=str(debug_file) if debug_file is not None else "",
             )
             append_phase03_debug_log(
                 get_thread_climate_debug_file() or debug_file,
@@ -2214,13 +2759,17 @@ def precompute_chc_series_batches(
             unregister_active_climate_worker()
             clear_thread_climate_debug_context()
 
-    aggregated_entries: dict[tuple[str, str, str, str], dict[str, dict[str, float | None]]] = {}
     with ThreadPoolExecutor(max_workers=max(1, min(worker_count, len(grouped_by_pixel)))) as executor:
-        future_map: dict[object, dict[str, object]] = {}
-        for pixel_group_item in grouped_by_pixel.items():
+        pending_futures: dict[object, dict[str, object]] = {}
+        pixel_queue = iter(grouped_by_pixel.items())
+
+        def submit_next_pixel() -> bool:
+            pixel_group_item = next(pixel_queue, None)
+            if pixel_group_item is None:
+                return False
             future = executor.submit(prepare_pixel_group, pixel_group_item)
             pixel_id = pixel_group_item[0]
-            future_map[future] = {
+            pending_futures[future] = {
                 "pixel_id": pixel_id,
                 "submitted_at": time.monotonic(),
                 "series_count": len(pixel_group_item[1]),
@@ -2233,8 +2782,11 @@ def precompute_chc_series_batches(
                     "series_count": len(pixel_group_item[1]),
                 },
             )
+            return True
 
-        pending_futures = dict(future_map)
+        for _ in range(max(1, worker_count)):
+            if not submit_next_pixel():
+                break
         last_heartbeat_at = time.monotonic()
         while pending_futures:
             done_futures, _pending_set = wait(
@@ -2308,15 +2860,15 @@ def precompute_chc_series_batches(
                     },
                 )
                 if materialized_entries:
-                    aggregated_entries.update(materialized_entries)
+                    upsert_nasa_cache_entries(materialized_entries)
+                    if len(series_items) <= 512:
+                        with _CHC_CACHE_LOCK:
+                            cache.update(materialized_entries)
                 stats["series_from_local_cache"] += local_stats["series_from_local_cache"]
                 stats["series_from_shared_cache"] += local_stats["series_from_shared_cache"]
                 stats["series_materialized"] += local_stats["series_materialized"]
+                submit_next_pixel()
 
-    if aggregated_entries:
-        with _CHC_CACHE_LOCK:
-            cache.update(aggregated_entries)
-        upsert_nasa_cache_entries(aggregated_entries)
     return stats
 
 
@@ -2434,11 +2986,18 @@ def enrich_soils(
     cache_path: Path,
     *,
     progress_callback: ProgressCallback | None = None,
-) -> tuple[list[dict[str, object]], dict[str, int]]:
+) -> tuple[list[dict[str, object]], dict[str, object]]:
     total_rows = len(records)
     point_tasks, point_counts = _build_soil_point_tasks(records)
     total_points = len(point_tasks)
     worker_count = resolve_phase03_soil_worker_limit(total_points) if total_points > 1 else 1
+
+    provider = os.environ.get("APP_PHASE03_SOIL_PROVIDER", "rest").strip().lower()
+    if provider == "rasters":
+        from preprocess.soil_rasters import enrich_records
+        return enrich_records(records, cache_path, progress_callback=progress_callback, worker_count=worker_count)
+    if provider != "rest":
+        raise ValueError(f"Unsupported soil provider: {provider}")
 
     output_records: list[dict[str, object]] = []
     resolved_points: dict[str, dict[str, object]] = {}
@@ -2447,61 +3006,118 @@ def enrich_soils(
     fallback_cells = 0
     cache_changed = False
 
-    payload_lock = Lock()
-    progress_lock = Lock()
+    if progress_callback:
+        progress_callback(94, "Checking soil cache", f"Checking reusable soil data for {total_points} points.",
+                          {"phase": "phase03", "soil_unique_points_total": total_points})
     soil_cache_payload = soil_enrichment.normalize_cache_payload(soil_enrichment.load_cache_payload(cache_path))
+    points = soil_cache_payload["points"]
+    # Resolve shared cache membership once; workers own their payloads and never
+    # hold a shared-state lock while waiting on the network.
+    missing_keys = [point_id for point_id, _, _ in point_tasks if not isinstance(points.get(point_id), dict)]
+    points.update(soil_enrichment.get_soil_cache_entries(missing_keys))
     processed_points = 0
+    processed_rows = 0
+    pending_entries = {}
+    persisted_points = 0
+    started_at = time.monotonic()
+    last_report_at = 0.0
+    last_flush_at = started_at
+    max_pending = max(1, worker_count * 2)
+    pending_count = 0
 
-    def report_progress() -> None:
-        if not progress_callback:
+    def report_progress(*, force=False) -> None:
+        nonlocal last_report_at
+        now = time.monotonic()
+        if not progress_callback or (not force and now - last_report_at < 1.0):
             return
-        with progress_lock:
-            processed_rows = sum(point_counts.get(point_id, 0) for point_id in resolved_points)
-            percent = 94 + round((processed_rows / total_rows) * 3) if total_rows else 94
-            progress_callback(
-                percent,
-                "Enriching soils",
-                f"Resolving soil data for {processed_rows}/{total_rows} prediction rows.",
-                {
-                    "phase": "phase03",
-                    "soil_processed_rows": processed_rows,
-                    "soil_total_rows": total_rows,
-                    "soil_cache_hits": cache_hit_cells,
-                    "soil_service_success_cells": service_success_cells,
-                    "soil_fallback_cells": fallback_cells,
-                    "soil_parallel_workers": worker_count,
-                    "soil_unique_points_total": total_points,
-                    "soil_unique_points_processed": processed_points,
-                },
-            )
+        last_report_at = now
+        elapsed = max(now - started_at, 0.0)
+        rate = processed_points / elapsed if elapsed else 0.0
+        percent = 94 + (processed_points / total_points * 3) if total_points else 97
+        progress_callback(
+            round(percent, 1), "Enriching soils",
+            f"Resolving soils: {processed_points}/{total_points} points; "
+            f"{processed_rows}/{total_rows} rows. Service responses: {service_success_cells}; "
+            f"cached points: {cache_hit_cells}; default values: {fallback_cells}.",
+            {
+                "phase": "phase03", "stage_completed": processed_points,
+                "stage_total": total_points, "stage_unit": "points",
+                "stage_percent": round(processed_points / total_points * 100, 2) if total_points else 100,
+                "stage_elapsed_seconds": round(elapsed, 1),
+                "stage_rate_per_second": round(rate, 3),
+                "stage_eta_seconds": round((total_points - processed_points) / rate, 1) if rate and processed_points >= 5 else None,
+                "soil_processed_rows": processed_rows, "soil_total_rows": total_rows,
+                "soil_cache_hits": cache_hit_cells, "soil_service_success_cells": service_success_cells,
+                "soil_fallback_cells": fallback_cells, "soil_parallel_workers": worker_count,
+                "soil_unique_points_total": total_points, "soil_unique_points_processed": processed_points,
+                "soil_pending_tasks": pending_count, "soil_max_pending_tasks": max_pending,
+                "soil_persisted_points": persisted_points,
+            },
+        )
 
-    def resolve_point(task: tuple[str, float, float]) -> tuple[str, dict[str, object], str, bool]:
+    def flush_pending(*, force=False):
+        nonlocal persisted_points, last_flush_at
+        if not pending_entries:
+            return
+        if not force and len(pending_entries) < 64 and time.monotonic() - last_flush_at < 5:
+            return
+        soil_enrichment.upsert_soil_cache_entries(pending_entries)
+        persisted_points += len(pending_entries)
+        pending_entries.clear()
+        last_flush_at = time.monotonic()
+
+    def resolve_point(task):
         point_id, latitude, longitude = task
-        with payload_lock:
-            return (point_id, *soil_enrichment.resolve_soil_record_from_payload(
-                latitude,
-                longitude,
-                payload=soil_cache_payload,
-            ))
+        cached = points.get(point_id)
+        if isinstance(cached, dict):
+            return point_id, cached, "cache_hit", False
+        private_payload = {"version": soil_enrichment.SOIL_CACHE_VERSION, "points": {}}
+        return (point_id, *soil_enrichment.resolve_soil_record_from_payload(
+            latitude, longitude, payload=private_payload, lookup_shared_cache=False,
+        ))
 
-    if point_tasks:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            future_map = {executor.submit(resolve_point, task): task[0] for task in point_tasks}
-            for future in as_completed(future_map):
-                point_id, soil_record, resolved_source, point_cache_changed = future.result()
-                resolved_points[point_id] = soil_record
-                processed_points += 1
-                cache_changed = cache_changed or point_cache_changed
-                if resolved_source == "cache_hit":
-                    cache_hit_cells += 1
-                elif resolved_source == "soilgrids":
-                    service_success_cells += 1
-                if soil_record.get("soil_source") == "fallback_default":
-                    fallback_cells += 1
-                report_progress()
-
-    if cache_changed:
-        soil_enrichment.write_cache_payload(cache_path, soil_cache_payload)
+    report_progress(force=True)
+    try:
+        if point_tasks:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                tasks = iter(point_tasks)
+                futures = set()
+                exhausted = False
+                while futures or not exhausted:
+                    while len(futures) < max_pending and not exhausted:
+                        task = next(tasks, None)
+                        if task is None:
+                            exhausted = True
+                        else:
+                            futures.add(executor.submit(resolve_point, task))
+                    pending_count = len(futures)
+                    if not futures:
+                        break
+                    done, _ = wait(futures, timeout=1, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        futures.remove(future)
+                        point_id, soil_record, resolved_source, changed = future.result()
+                        resolved_points[point_id] = soil_record
+                        processed_points += 1
+                        processed_rows += point_counts.get(point_id, 0)
+                        cache_changed = cache_changed or changed
+                        if changed:
+                            pending_entries[point_id] = soil_record
+                        if resolved_source == "cache_hit":
+                            cache_hit_cells += 1
+                        elif resolved_source == "soilgrids":
+                            service_success_cells += 1
+                        if soil_record.get("soil_source") == "fallback_default":
+                            fallback_cells += 1
+                    pending_count = len(futures)
+                    flush_pending()
+                    report_progress()
+    finally:
+        # Preserve every result already consumed even if another worker fails.
+        flush_pending(force=True)
+        if cache_changed:
+            points.update(resolved_points)
+            soil_enrichment.write_cache_payload(cache_path, soil_cache_payload)
 
     enriched_rows = 0
     for record in records:
@@ -2523,7 +3139,7 @@ def enrich_soils(
         output_records.append(updated)
         enriched_rows += 1
 
-    report_progress()
+    report_progress(force=True)
 
     return output_records, {
         "soil_enriched_rows": enriched_rows,
@@ -2534,6 +3150,9 @@ def enrich_soils(
         "soil_service_success_cells": service_success_cells,
         "soil_parallel_workers": worker_count,
         "soil_unique_points_total": total_points,
+        "soil_persisted_points": persisted_points,
+        "soil_max_pending_tasks": max_pending,
+        "soil_elapsed_seconds": round(time.monotonic() - started_at, 3),
     }
 
 
@@ -2557,7 +3176,35 @@ def write_progress(
     if details:
         payload["details"] = details
     progress_file.parent.mkdir(parents=True, exist_ok=True)
-    progress_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=progress_file.parent, delete=False) as temporary:
+        temporary.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        temporary_path = Path(temporary.name)
+    try:
+        os.replace(temporary_path, progress_file)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+from pipeline.progress import work_progress, reported_operation
+
+
+def publish_phase03_progress(progress_file, progress_callback, percent, stage, message, details=None):
+    if progress_callback:
+        progress_callback(percent, stage, message, details)
+    else:
+        write_progress(progress_file, percent=percent, stage=stage, message=message, details=details)
+
+
+def task_progress_details(completed, total, unit, started_at):
+    elapsed = max(0.0, time.monotonic() - started_at)
+    rate = completed / elapsed if elapsed else 0.0
+    return {
+        "phase": "phase03", "stage_completed": completed, "stage_total": total,
+        "stage_unit": unit, "stage_percent": round(completed / total * 100, 2) if total else 100,
+        "stage_elapsed_seconds": round(elapsed, 1),
+        "stage_rate_per_second": round(rate, 3),
+        "stage_eta_seconds": round((total - completed) / rate, 1) if rate and completed >= 5 else None,
+    }
 
 
 def configure_parallel_progress_context(
@@ -2580,6 +3227,7 @@ def configure_parallel_progress_context(
         _CHC_PARALLEL_PROGRESS_CONTEXT["visible_fraction_sum"] = 0.0
         _CHC_PARALLEL_PROGRESS_CONTEXT["last_report_at"] = 0.0
         _CHC_PARALLEL_PROGRESS_CONTEXT["diagnostics"] = {}
+        _CHC_PARALLEL_PROGRESS_CONTEXT["started_at"] = time.monotonic()
 
 
 def reset_parallel_progress_context() -> None:
@@ -2595,6 +3243,7 @@ def reset_parallel_progress_context() -> None:
         _CHC_PARALLEL_PROGRESS_CONTEXT["visible_fraction_sum"] = 0.0
         _CHC_PARALLEL_PROGRESS_CONTEXT["last_report_at"] = 0.0
         _CHC_PARALLEL_PROGRESS_CONTEXT["diagnostics"] = {}
+        _CHC_PARALLEL_PROGRESS_CONTEXT["started_at"] = time.monotonic()
 
 
 def update_parallel_progress_diagnostics(**diagnostics: object) -> None:
@@ -2663,7 +3312,7 @@ def report_parallel_series_progress(
 
         now = time.monotonic()
         last_report_at = float(_CHC_PARALLEL_PROGRESS_CONTEXT.get("last_report_at", 0.0) or 0.0)
-        if not force and not normalized_completed and now - last_report_at < 2.0:
+        if not force and now - last_report_at < 2.0 and int(_CHC_PARALLEL_PROGRESS_CONTEXT.get("visible_completed_series", 0)) < series_total:
             return
         _CHC_PARALLEL_PROGRESS_CONTEXT["last_report_at"] = now
         effective_series_total = max(series_total, 1)
@@ -2703,7 +3352,8 @@ def report_parallel_series_progress(
 
     details_payload = {
         "phase": "phase03",
-        "climate_progress_stage": "compute",
+        **task_progress_details(completed_series, effective_series_total, "historic series", float(_CHC_PARALLEL_PROGRESS_CONTEXT.get("started_at", time.monotonic()))),
+        "climate_progress_stage": "sampling",
         "climate_series_completed": completed_series,
         "climate_series_started": started_series,
         "climate_series_total": effective_series_total,
@@ -2719,7 +3369,7 @@ def report_parallel_series_progress(
     overall_percent = round(33 + (effective_overall_fraction * 17), 1) if effective_overall_fraction > 0 else 33.0
     if completed:
         message = (
-            f"Computing climate windows from prepared rasters: completed {completed_series}/{effective_series_total} climate series. "
+            f"Preparing daily climate data: completed {completed_series}/{effective_series_total} historic series. "
             f"{active_workers} worker{'s' if active_workers != 1 else ''} still active. "
             f"Current lead worker: {primary_worker_summary or 'waiting for worker detail'}. "
             f"{primary_union_progress} "
@@ -2727,7 +3377,7 @@ def report_parallel_series_progress(
         )
     else:
         message = (
-            f"Computing climate windows in parallel: {completed_series}/{effective_series_total} climate series completed. "
+            f"Preparing daily climate data: {completed_series}/{effective_series_total} historic series completed. "
             f"{started_series}/{effective_series_total} started or in progress. "
             f"{active_workers} worker{'s' if active_workers != 1 else ''} active. "
             f"Current lead worker: {primary_worker_summary or 'waiting for worker detail'}. "
@@ -2738,14 +3388,14 @@ def report_parallel_series_progress(
     write_progress(
         progress_file,
         percent=overall_percent,
-        stage="Computing climate windows",
+        stage="Preparing daily climate series",
         message=message,
         details=details_payload,
     )
     if progress_callback:
         progress_callback(
             overall_percent,
-            "Computing climate windows",
+            "Preparing daily climate series",
             message,
             details_payload,
         )
@@ -2760,6 +3410,7 @@ def build_phase02_records_parallel_workspace(
     skip_soil_enrichment: bool,
     climate_override: dict[str, object] | None = None,
     target_column: str = ea_pipeline.YIELD_HEADER,
+    climate_prefetch_callback: Callable[[list[date]], dict[str, object]] | None = None,
 ) -> tuple[list[str], list[dict[str, object]], dict[str, object]]:
     output_dir = ea_pipeline.PHASE_DIRS["phase02"]
     debug_file = (
@@ -2772,6 +3423,8 @@ def build_phase02_records_parallel_workspace(
         "country_localities",
         "regional_manual",
     }
+    publish_phase03_progress(progress_file, progress_callback, 12, "Preparing climate grid",
+                             "Expanding the selected rows and identifying the climate points.")
     source_records = records
     if locality_mode:
         if str((climate_override or {}).get("climate_scope", "")).strip() == "country_localities":
@@ -2783,6 +3436,10 @@ def build_phase02_records_parallel_workspace(
             source_records, data_input_rows, locality_metadata = ea_pipeline.expand_records_for_manual_bbox_localities(
                 records,
                 climate_override or {},
+                progress_callback=work_progress(
+                    lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+                    12, "Preparing climate grid", phase="phase03",
+                ),
             )
         skipped_rows = 0
     else:
@@ -2790,7 +3447,11 @@ def build_phase02_records_parallel_workspace(
     if not data_input_rows:
         raise ValueError("No hay filas exportables para la fase climatica.")
 
-    ea_pipeline.write_csv(output_dir / "dataInput.csv", ea_pipeline.CLIMATE_INPUT_COLUMNS, data_input_rows)
+    input_progress = work_progress(
+        lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+        12, "Saving climate grid input", phase="phase03",
+    )
+    ea_pipeline.write_csv(output_dir / "dataInput.csv", ea_pipeline.CLIMATE_INPUT_COLUMNS, data_input_rows, progress_callback=input_progress)
 
     cache: dict[tuple[str, str, str, str], dict[str, dict[str, float | None]]] = {}
     feature_cache_path = resolve_shared_climate_feature_cache_path()
@@ -2804,7 +3465,12 @@ def build_phase02_records_parallel_workspace(
         else load_climate_feature_cache(feature_cache_path)
     )
 
-    grouped_rows, row_series_keys = build_climate_series_groups(data_input_rows)
+    grouped_rows, row_series_keys = build_climate_series_groups(
+        data_input_rows, progress_callback=work_progress(
+            lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+            13, "Grouping climate series", phase="phase03",
+        ),
+    )
     representative_rows = {series_key: rows[0] for series_key, rows in grouped_rows.items()}
 
     unique_series_items = list(representative_rows.items())
@@ -2844,8 +3510,17 @@ def build_phase02_records_parallel_workspace(
         "series_from_shared_cache": 0,
         "series_materialized": 0,
     }
+    phase_timings_seconds: dict[str, float] = {}
 
     serialized_series_keys = [serialize_climate_series_key(series_key) for series_key, _row in unique_series_items]
+    publish_phase03_progress(progress_file, progress_callback, 14, "Checking climate feature cache",
+                             f"Checking cached results for {total_unique_series} climate series.")
+    cache_progress = work_progress(
+        lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+        14, "Checking climate feature cache", phase="phase03", unit="steps",
+    )
+    cache_progress(0, 1)
+    feature_cache_lookup_started_at = time.monotonic()
     if use_shared_feature_cache:
         cached_feature_payloads = get_climate_feature_cache_entries(
             serialized_series_keys,
@@ -2860,6 +3535,52 @@ def build_phase02_records_parallel_workspace(
             )
             if isinstance(payload, dict)
         }
+    cache_progress(1, 1, True)
+    phase_timings_seconds["feature_cache_lookup"] = round(
+        max(0.0, time.monotonic() - feature_cache_lookup_started_at),
+        3,
+    )
+
+    missing_feature_series_items = [
+        item
+        for item in unique_series_items
+        if not is_valid_climate_feature_cache_payload(
+            cached_feature_payloads.get(serialize_climate_series_key(item[0]))
+        )
+    ]
+    daily_climate_cache_enabled = resolve_phase03_daily_climate_cache_enabled()
+    cache_plan_started_at = time.monotonic()
+    precompute_series_items, required_chc_dates = plan_chc_precompute_series_and_raster_dates(
+        missing_feature_series_items,
+        climate_override,
+        daily_climate_cache_enabled=daily_climate_cache_enabled,
+        progress_callback=progress_callback,
+    )
+    phase_timings_seconds["cache_and_raster_plan"] = round(
+        max(0.0, time.monotonic() - cache_plan_started_at),
+        3,
+    )
+    prefetch_started_at = time.monotonic()
+    if climate_prefetch_callback is not None:
+        prefetch_metadata = climate_prefetch_callback(required_chc_dates)
+    else:
+        prefetch_metadata = prefetch_chc_rasters(
+            required_chc_dates,
+            progress_file=progress_file,
+            progress_callback=progress_callback,
+            skip_soil_enrichment=skip_soil_enrichment,
+        )
+    phase_timings_seconds["raster_prefetch"] = round(
+        float(prefetch_metadata.get("elapsed_seconds", max(0.0, time.monotonic() - prefetch_started_at)) or 0.0),
+        3,
+    )
+
+    global _CHC_PREPARED_RASTER_PATHS
+    global _CHC_STRICT_PREPARED_RASTERS
+    original_prepared_raster_paths = dict(_CHC_PREPARED_RASTER_PATHS)
+    original_strict_prepared_rasters = _CHC_STRICT_PREPARED_RASTERS
+    raw_prepared_paths = prefetch_metadata.get("prepared_raster_paths", {})
+    prepared_raster_paths = dict(raw_prepared_paths) if isinstance(raw_prepared_paths, dict) else {}
 
     def process_series(item: tuple[tuple[str, str, str], dict[str, str]]) -> tuple[
         tuple[str, str, str],
@@ -2875,7 +3596,7 @@ def build_phase02_records_parallel_workspace(
             series_key=series_label,
             row_latitude=str(row.get("latitude", "") or ""),
             row_longitude=str(row.get("longitude", "") or ""),
-            debug_file=str(debug_file),
+            debug_file=str(debug_file) if debug_file is not None else "",
         )
         try:
             append_phase03_debug_log(
@@ -2889,16 +3610,15 @@ def build_phase02_records_parallel_workspace(
             )
             serialized_series_key = serialize_climate_series_key(series_key)
             cached_feature_payload = cached_feature_payloads.get(serialized_series_key)
-            if isinstance(cached_feature_payload, dict):
+            if is_valid_climate_feature_cache_payload(cached_feature_payload):
                 cached_output_row = cached_feature_payload.get("output_row")
                 cached_audit_row = cached_feature_payload.get("audit_row")
-                if isinstance(cached_output_row, dict) and isinstance(cached_audit_row, dict):
-                    return series_key, dict(cached_output_row), dict(cached_audit_row), {
-                        "cache_hits": 0,
-                        "cache_misses": 0,
-                        "feature_cache_hits": 1,
-                        "feature_cache_misses": 0,
-                    }
+                return series_key, dict(cached_output_row), dict(cached_audit_row), {
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                    "feature_cache_hits": 1,
+                    "feature_cache_misses": 0,
+                }
             local_stats = {"cache_hits": 0, "cache_misses": 0}
             effective_climate_override = dict(climate_override or {})
             if locality_mode:
@@ -2906,7 +3626,7 @@ def build_phase02_records_parallel_workspace(
             try:
                 output_row, audit_row = ea_pipeline.build_output_row(
                     row,
-                    cache,
+                    cache if total_unique_series <= 512 else {},
                     cache_path=None,
                     climate_override=effective_climate_override,
                     cache_stats=local_stats,
@@ -2947,7 +3667,7 @@ def build_phase02_records_parallel_workspace(
         progress_callback=progress_callback,
         skip_soil_enrichment=skip_soil_enrichment,
         worker_count=worker_count,
-        series_total=progress_series_total,
+        series_total=len(precompute_series_items),
     )
     update_parallel_progress_diagnostics(
         climate_pending_series_count=0,
@@ -2967,18 +3687,15 @@ def build_phase02_records_parallel_workspace(
     )
 
     global _CHC_PARALLEL_PROGRESS_MODE
+    global _CHC_DOWNLOAD_PROGRESS_HOOK
     original_parallel_progress_mode = _CHC_PARALLEL_PROGRESS_MODE
+    original_series_progress_hook = _CHC_DOWNLOAD_PROGRESS_HOOK
     _CHC_PARALLEL_PROGRESS_MODE = worker_count > 1
+    _CHC_PREPARED_RASTER_PATHS = prepared_raster_paths
+    _CHC_STRICT_PREPARED_RASTERS = True
+    precompute_started_at = time.monotonic()
+    output_compute_started_at = precompute_started_at
     try:
-        missing_feature_series_items = [
-            item
-            for item in unique_series_items
-            if serialize_climate_series_key(item[0]) not in cached_feature_payloads
-        ]
-        precompute_series_items = build_forecast_reference_precompute_series_items(
-            missing_feature_series_items,
-            climate_override,
-        )
         if PHASE03_FORCE_SERIAL_DIAGNOSTIC:
             batch_stats = {
                 "pixel_groups": 0,
@@ -2999,7 +3716,34 @@ def build_phase02_records_parallel_workspace(
                 worker_count=worker_count,
                 debug_file=debug_file,
             )
+        phase_timings_seconds["climate_precompute_and_raster_sampling"] = round(
+            max(0.0, time.monotonic() - precompute_started_at),
+            3,
+        )
+        output_compute_started_at = time.monotonic()
+        # Sampling hooks are no longer the source of truth for aggregation.
+        _CHC_PARALLEL_PROGRESS_MODE = False
+        _CHC_DOWNLOAD_PROGRESS_HOOK = None
+        last_window_report_at = 0.0
 
+        def report_windows(*, force=False):
+            nonlocal last_window_report_at
+            now = time.monotonic()
+            if not force and now - last_window_report_at < 1:
+                return
+            last_window_report_at = now
+            fraction = completed_unique_series / total_unique_series if total_unique_series else 1
+            publish_phase03_progress(
+                progress_file, progress_callback, round(50 + fraction * 35, 1),
+                "Computing climate windows",
+                f"Calculated windows for {completed_unique_series}/{total_unique_series} climate series. "
+                f"Cached results reused: {aggregate_feature_cache_hits}.",
+                {**task_progress_details(completed_unique_series, total_unique_series, "series", output_compute_started_at),
+                 "climate_progress_stage": "windows", "climate_output_series_completed": completed_unique_series,
+                 "climate_output_series_total": total_unique_series, "climate_feature_cache_hits": aggregate_feature_cache_hits},
+            )
+
+        report_windows(force=True)
         if PHASE03_FORCE_SERIAL_DIAGNOSTIC:
             append_phase03_debug_log(
                 debug_file,
@@ -3022,6 +3766,7 @@ def build_phase02_records_parallel_workspace(
                 series_key, output_row, audit_row, local_stats = process_series(item)
                 representative_results[series_key] = (output_row, audit_row)
                 completed_unique_series += 1
+                report_windows()
                 aggregate_cache_hits += int(local_stats.get("cache_hits", 0) or 0)
                 aggregate_cache_misses += int(local_stats.get("cache_misses", 0) or 0)
                 aggregate_feature_cache_hits += int(local_stats.get("feature_cache_hits", 0) or 0)
@@ -3111,7 +3856,7 @@ def build_phase02_records_parallel_workspace(
                                     "active_worker_sample": active_worker_sample,
                                 },
                             )
-                            report_parallel_series_progress("__heartbeat__", 0, 1, completed=False, force=True)
+                            report_windows(force=True)
                             last_heartbeat_at = now
                         continue
                     last_heartbeat_at = time.monotonic()
@@ -3140,6 +3885,7 @@ def build_phase02_records_parallel_workspace(
                             raise
                         representative_results[series_key] = (output_row, audit_row)
                         completed_unique_series += 1
+                        report_windows()
                         aggregate_cache_hits += int(local_stats.get("cache_hits", 0) or 0)
                         aggregate_cache_misses += int(local_stats.get("cache_misses", 0) or 0)
                         aggregate_feature_cache_hits += int(local_stats.get("feature_cache_hits", 0) or 0)
@@ -3173,9 +3919,24 @@ def build_phase02_records_parallel_workspace(
                             climate_active_worker_sample=get_active_climate_worker_snapshots()[: min(worker_count, 5)],
                         )
     finally:
+        phase_timings_seconds["climate_output_and_series_compute"] = round(
+            max(0.0, time.monotonic() - output_compute_started_at),
+            3,
+        )
         _CHC_PARALLEL_PROGRESS_MODE = original_parallel_progress_mode
+        _CHC_DOWNLOAD_PROGRESS_HOOK = original_series_progress_hook
         reset_parallel_progress_context()
+        _CHC_PREPARED_RASTER_PATHS = original_prepared_raster_paths
+        _CHC_STRICT_PREPARED_RASTERS = original_strict_prepared_rasters
 
+    report_windows(force=True)
+    publish_phase03_progress(progress_file, progress_callback, 86, "Saving climate feature cache",
+                             "Climate windows finished. Saving reusable climate results.")
+    cache_save_progress = work_progress(
+        lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+        86, "Saving climate feature cache", phase="phase03", unit="steps",
+    )
+    cache_save_progress(0, 1)
     if computed_feature_payloads:
         if feature_cache_path.resolve() == resolve_shared_climate_feature_cache_path().resolve():
             upsert_climate_feature_cache_entries(computed_feature_payloads)
@@ -3184,9 +3945,17 @@ def build_phase02_records_parallel_workspace(
             persistent_feature_cache.update(computed_feature_payloads)
             save_climate_feature_cache(feature_cache_path, persistent_feature_cache)
 
+    cache_save_progress(1, 1, True)
+    publish_phase03_progress(progress_file, progress_callback, 87, "Building climate output rows",
+                             f"Preparing {len(data_input_rows)} output rows and the window audit.")
     output_rows: list[dict[str, str]] = []
     audit_rows: list[dict[str, str]] = []
-    for row, series_key in zip(data_input_rows, row_series_keys):
+    row_progress = work_progress(
+        lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+        87, "Building climate output rows", phase="phase03",
+    )
+    row_progress(0, len(data_input_rows))
+    for completed, (row, series_key) in enumerate(zip(data_input_rows, row_series_keys), 1):
         template_output, template_audit = representative_results[series_key]
         output_row = {column: row[column] for column in ea_pipeline.CLIMATE_ID_COLUMNS}
         for header in output_columns:
@@ -3210,14 +3979,26 @@ def build_phase02_records_parallel_workspace(
         audit_row["selected_model_id"] = row.get("selected_model_id", "")
         output_rows.append(output_row)
         audit_rows.append(audit_row)
+        row_progress(completed, len(data_input_rows))
+    row_progress(len(data_input_rows), len(data_input_rows), True)
 
-    ea_pipeline.write_csv(output_dir / "output.csv", output_columns, output_rows)
-    ea_pipeline.write_csv(output_dir / "weekly_windows_audit.csv", ea_pipeline.CLIMATE_AUDIT_COLUMNS, audit_rows)
+    publish_phase03_progress(progress_file, progress_callback, 88, "Saving climate CSV",
+                             f"Writing {len(output_rows)} climate output rows.")
+    ea_pipeline.write_csv(output_dir / "output.csv", output_columns, output_rows, progress_callback=work_progress(lambda *args: publish_phase03_progress(progress_file, progress_callback, *args), 88, "Saving climate CSV", phase="phase03"))
+    publish_phase03_progress(progress_file, progress_callback, 89, "Saving window audit",
+                             f"Writing the audit for {len(audit_rows)} climate rows.")
+    ea_pipeline.write_csv(output_dir / "weekly_windows_audit.csv", ea_pipeline.CLIMATE_AUDIT_COLUMNS, audit_rows, progress_callback=work_progress(lambda *args: publish_phase03_progress(progress_file, progress_callback, *args), 89, "Saving window audit", phase="phase03"))
 
-    climate_by_key = {
-        tuple(ea_pipeline.normalize_key_value(row[column]) for column in ea_pipeline.CLIMATE_ID_COLUMNS): row
-        for row in output_rows
-    }
+    lookup_progress = work_progress(
+        lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+        89, "Indexing climate output rows", phase="phase03",
+    )
+    lookup_progress(0, len(output_rows))
+    climate_by_key = {}
+    for completed, row in enumerate(output_rows, 1):
+        climate_by_key[tuple(ea_pipeline.normalize_key_value(row[column]) for column in ea_pipeline.CLIMATE_ID_COLUMNS)] = row
+        lookup_progress(completed, len(output_rows))
+    lookup_progress(len(output_rows), len(output_rows), True)
 
     phase02_headers = (
         ea_pipeline.build_country_locality_phase02_headers(headers, target_header=target_column)
@@ -3227,6 +4008,11 @@ def build_phase02_records_parallel_workspace(
     phase02_records: list[dict[str, object]] = []
     matched_rows = 0
     unmatched_rows = 0
+    joining_progress = work_progress(
+        lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+        89, "Joining climate features to selected profiles", phase="phase03",
+    )
+    joining_progress(0, len(source_records))
     if locality_mode:
         matched_rows = len(source_records)
         for record, climate_row in zip(source_records, output_rows):
@@ -3236,6 +4022,7 @@ def build_phase02_records_parallel_workspace(
                     continue
                 enriched[ea_pipeline.climate_header_to_label(header)] = climate_row.get(header, "")
             phase02_records.append(enriched)
+            joining_progress(len(phase02_records), len(source_records))
     else:
         for record in source_records:
             key = (
@@ -3256,14 +4043,27 @@ def build_phase02_records_parallel_workspace(
                     continue
                 enriched[ea_pipeline.climate_header_to_label(header)] = climate_row.get(header, "")
             phase02_records.append(enriched)
+            joining_progress(len(phase02_records), len(source_records))
 
+    joining_progress(len(source_records), len(source_records), True)
+    publish_phase03_progress(progress_file, progress_callback, 90, "Saving climate workbook",
+                             f"Writing {len(phase02_records)} enriched rows to the climate workbook.")
     ea_pipeline.write_workbook(
         output_dir / "phase02_climate_enriched.xlsx",
         "phase02_climate",
         phase02_headers,
         phase02_records,
+        progress_callback=work_progress(
+            lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+            90, "Saving climate workbook", phase="phase03",
+        ),
     )
 
+    metadata_progress = work_progress(
+        lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+        91, "Building climate metadata", phase="phase03", unit="steps",
+    )
+    metadata_progress(0, 1)
     metadata = {
         "phase": "phase02_climate_enriched",
         "input_row_count": len(records),
@@ -3288,6 +4088,18 @@ def build_phase02_records_parallel_workspace(
         "parallel_unique_climate_series": total_unique_series,
         "parallel_progress_series_total": progress_series_total,
         "parallel_workers": worker_count,
+        "daily_climate_cache_enabled": daily_climate_cache_enabled,
+        "daily_climate_cache_version": DAILY_CLIMATE_CACHE_VERSION,
+        "climate_prefetch": {
+            "required_unique_dates": len(required_chc_dates),
+            "task_total": int(prefetch_metadata.get("task_total", 0) or 0),
+            "downloaded": int(prefetch_metadata.get("downloaded", 0) or 0),
+            "cached": int(prefetch_metadata.get("cached", 0) or 0),
+            "raster_resolve_seconds": float(prefetch_metadata.get("raster_resolve_seconds", 0.0) or 0.0),
+            "raster_validation_seconds": float(prefetch_metadata.get("raster_validation_seconds", 0.0) or 0.0),
+            "download_resolution_seconds": float(prefetch_metadata.get("download_resolution_seconds", 0.0) or 0.0),
+        },
+        "phase_timings_seconds": phase_timings_seconds,
         "batched_pixel_groups": batch_stats["pixel_groups"],
         "batched_series_total": batch_stats["series_total"],
         "batched_series_from_local_cache": batch_stats["series_from_local_cache"],
@@ -3299,7 +4111,10 @@ def build_phase02_records_parallel_workspace(
         "unique_climate_query_key_count": total_unique_series,
         **locality_metadata,
     }
-    ea_pipeline.write_metadata(output_dir / "metadata.json", metadata)
+    metadata_progress(1, 1, True)
+    publish_phase03_progress(progress_file, progress_callback, 91, "Saving climate metadata",
+                             "Saving climate processing metrics and grid traceability.")
+    reported_operation(lambda *args: publish_phase03_progress(progress_file, progress_callback, *args), 91, "Saving climate metadata", "phase03", lambda: ea_pipeline.write_metadata(output_dir / "metadata.json", metadata))
     return phase02_headers, phase02_records, metadata
 
 
@@ -3394,10 +4209,17 @@ def create_phase03_workbook(
     climate_override: dict[str, object] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, object]:
+    publish_phase03_progress(progress_file, progress_callback, 10, "Reading phase03 input",
+                             "Reading the input workbook and validating dates and configured columns.")
     phase01 = load_phase01_module()
     definition = phase01.read_definition(definition_file)
     initial_settings = definition.get("initial_settings", {})
-    headers, records = phase01.read_sheet_headers_and_rows(phase02_workbook)
+    headers, records = phase01.read_sheet_headers_and_rows(
+        phase02_workbook, progress_callback=work_progress(
+            lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+            10, "Reading phase03 input", phase="phase03", unit="bytes",
+        ),
+    )
     if not headers:
         raise ValueError("The phase02 workbook is empty.")
     original_input_row_count = len(records)
@@ -3597,13 +4419,24 @@ def create_phase03_workbook(
                 len(records) * int((climate_override or {}).get("forecast_years_back") or 5),
             )
 
-    required_chc_dates = collect_required_chc_dates(records, climate_override)
-    prefetch_metadata = prefetch_chc_rasters(
-        required_chc_dates,
-        progress_file=progress_file,
-        progress_callback=progress_callback,
-        skip_soil_enrichment=skip_soil_enrichment,
-    )
+    required_chc_dates: list[date] = []
+    prefetch_metadata: dict[str, object] = {
+        "task_total": 0,
+        "downloaded": 0,
+        "cached": 0,
+        "prepared_raster_paths": {},
+    }
+
+    def prefetch_required_climate_rasters(required_dates: list[date]) -> dict[str, object]:
+        nonlocal required_chc_dates, prefetch_metadata
+        required_chc_dates = list(required_dates)
+        prefetch_metadata = prefetch_chc_rasters(
+            required_chc_dates,
+            progress_file=progress_file,
+            progress_callback=progress_callback,
+            skip_soil_enrichment=skip_soil_enrichment,
+        )
+        return prefetch_metadata
 
     original_load_nasa_cache = ea_pipeline.load_nasa_cache
     original_save_nasa_cache = ea_pipeline.save_nasa_cache
@@ -3618,7 +4451,6 @@ def create_phase03_workbook(
     original_chc_download_progress_hook = _CHC_DOWNLOAD_PROGRESS_HOOK
     original_chc_download_progress_state = dict(_CHC_DOWNLOAD_PROGRESS_STATE)
     original_prepared_raster_paths = dict(_CHC_PREPARED_RASTER_PATHS)
-    _CHC_PREPARED_RASTER_PATHS = dict(prefetch_metadata.get("prepared_raster_paths", {}))
     _CHC_DOWNLOAD_PROGRESS_STATE = {"series_total": estimated_series_total, "series_completed": 0, "series_total_days": 0, "download_max_processed_days": 0, "compute_max_processed_days": 0}
 
     def load_shared_nasa_cache(_cache_path: Path):
@@ -3646,6 +4478,7 @@ def create_phase03_workbook(
                 skip_soil_enrichment=skip_soil_enrichment,
                 climate_override=climate_override,
                 target_column=target_column,
+                climate_prefetch_callback=prefetch_required_climate_rasters,
             )
     finally:
         ea_pipeline.load_nasa_cache = original_load_nasa_cache
@@ -3713,13 +4546,15 @@ def create_phase03_workbook(
             progress_callback(
                 94,
                 "Enriching soils",
-                "Querying the soil service for the manual bounding-box grid and filling soil texture and depth.",
+                "Preparing soil enrichment for the manual grid with the configured soil provider.",
                 {"phase": "phase03", "soil_total_rows": len(phase03_records)},
             )
         phase03_records, soil_metadata = enrich_soils(
             phase03_records,
             soil_cache_path,
-            progress_callback=progress_callback,
+            progress_callback=lambda percent, stage, message, details=None: publish_phase03_progress(
+                progress_file, progress_callback, percent, stage, message, details,
+            ),
         )
         if soil_cache_path.exists():
             merge_cache_payload_files(soil_cache_path, shared_soil_cache_path)
@@ -3730,23 +4565,22 @@ def create_phase03_workbook(
         merge_cleanup_metadata,
     )
 
+    publish_phase03_progress(progress_file, progress_callback, 97, "Saving climate and soil workbook",
+                             f"Writing {len(phase03_records)} rows for the prediction flow.")
+    workbook_progress = work_progress(
+        lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
+        97, "Saving climate and soil workbook", phase="phase03",
+    )
     if climate_override and str(climate_override.get("climate_scope", "")).strip() == "regional_manual":
         phase01.write_xlsx_rows(
             output_file,
             phase03_headers,
             ([record.get(header, "") for header in phase03_headers] for record in phase03_records),
             len(phase03_records),
+            progress_callback=workbook_progress,
         )
     else:
-        phase01.write_xlsx(output_file, phase03_headers, phase03_records)
-    if progress_callback:
-        progress_callback(
-            97,
-            "Writing phase03prediction",
-            "Saving the climate and soil enriched workbook for the prediction flow.",
-            {"phase": "phase03", "output_workbook": str(output_file)},
-        )
-
+        phase01.write_xlsx(output_file, phase03_headers, phase03_records, progress_callback=workbook_progress)
     log_payload = {
         "phase": "phase03",
         "source_workbook": str(phase02_workbook),
