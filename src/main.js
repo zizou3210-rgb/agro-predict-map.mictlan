@@ -8611,6 +8611,21 @@ const hasManualGridCompetitionFeatures = () =>
   Array.isArray(datasetStore.prediction?.rawGeojson?.features) &&
   datasetStore.prediction.rawGeojson.features.length > 0;
 
+const syncManualGridSelectedFeature = (featureLookup) => {
+  const gridCellId = String(selectedFeature?.properties?.["Forecast grid cell id"] ?? "").trim();
+  if (!gridCellId) {
+    return;
+  }
+  const nextFeature = featureLookup.get(gridCellId) ?? null;
+  if (nextFeature === selectedFeature) {
+    return;
+  }
+  selectedFeature = nextFeature;
+  currentPage = 0;
+  hideTooltip();
+  renderDetails();
+};
+
 const renderManualGridOverlay = (transform) => {
   if (!mapContext?.manualGridHeatLayer || !mapContext?.manualGridCellsLayer || !mapContext?.manualGridMarkersLayer) {
     return;
@@ -8697,6 +8712,7 @@ const renderManualGridOverlay = (transform) => {
     if (profileHeatSamples === null) {
       profileHeatSamples = overlayState.profileHeatSampleLookups.get(lookupKey) ?? [];
     }
+    syncManualGridSelectedFeature(featureLookup);
   }
   const hasMultiProfileValues = multiProfileMode
     ? (

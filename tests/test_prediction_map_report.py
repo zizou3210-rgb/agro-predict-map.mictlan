@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from server import (
+    _build_manual_grid_categorical_label,
     _build_manual_grid_prediction_workbook_bytes,
     _build_manual_grid_profile_overlay_payload,
     build_prediction_display_feature_collection,
@@ -13,6 +14,41 @@ from server import (
 
 
 class PredictionMapReportTest(unittest.TestCase):
+    def test_zero_identifier_is_preserved_in_category_labels(self):
+        for value in (0, 0.0, "0", "0.0"):
+            with self.subTest(value=value):
+                self.assertEqual(_build_manual_grid_categorical_label(
+                    {"Name": "A", "GLS": value}, selected_id_header="GLS",
+                    multi_profile_mode=True, multi_germplasm_mode=True,
+                ), "A - 0")
+
+    def test_initial_and_filtered_overlays_match_report_with_numeric_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "raw.geojson"
+            cells = [dict(grid_cell_id=str(i), center_longitude=i, center_latitude=0,
+                          longitude_min=i-.1, longitude_max=i+.1, latitude_min=-.1, latitude_max=.1)
+                     for i in (1, 2)]
+            features = []
+            for cell, name, value in [(1, "A", 6), (1, "B", 5), (2, "A", 2), (2, "B", 4)]:
+                features.append(dict(type="Feature", geometry=dict(type="Point", coordinates=[cell, 0]),
+                                     properties={"Name": name, "GLS": 0,
+                                                 "Forecast grid cell id": str(cell),
+                                                 "Grain Yield predicted": value}))
+            path.write_text(json.dumps(dict(type="FeatureCollection", features=features)))
+            summary = dict(climate_scope="regional_manual", geojson_file=str(path),
+                           tabular_format="csv", manual_bbox_grid=dict(cells=cells),
+                           selected_id_header="GLS", multi_profile_mode=True)
+            for selected, expected in [(None, ["A - 0", "B - 0"]),
+                                       (["A - 0"], ["A - 0", "A - 0"]),
+                                       (["B - 0"], ["B - 0", "B - 0"]),
+                                       (["A - 0", "B - 0"], ["A - 0", "B - 0"])]:
+                with self.subTest(selected=selected):
+                    overlay = _build_manual_grid_profile_overlay_payload(summary, selected)
+                    self.assertEqual([sample["profileLabel"] for sample in overlay["heat_samples"]], expected)
+                    content, _ = _build_manual_grid_prediction_workbook_bytes(summary, selected)
+                    rows = list(csv.DictReader(io.StringIO(content.decode())))
+                    self.assertEqual([row["Name"] + " - " + row["GLS"] for row in rows], expected)
+
     def test_report_matches_cell_winners_for_each_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "raw.geojson"

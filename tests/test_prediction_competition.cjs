@@ -24,6 +24,26 @@ const createInteraction = new Function('state', `
 `);
 
 (async () => {
+  const purple = {properties: {'Forecast grid cell id':'1', GLS:0, 'Grain Yield predicted':3.214527}};
+  const blue = {properties: {'Forecast grid cell id':'1', GLS:4, 'Grain Yield predicted':3.214527}};
+  const detailsState = {selected:purple, hidden:0, renders:0};
+  const syncSelected = new Function('state', `
+    let selectedFeature = state.selected;
+    let currentPage = 3;
+    const hideTooltip = () => {state.hidden += 1;};
+    const renderDetails = () => {state.renders += 1; state.details = selectedFeature;};
+    ${extract('syncManualGridSelectedFeature')}
+    return lookup => {syncManualGridSelectedFeature(lookup); return {selectedFeature,currentPage};};
+  `)(detailsState);
+  assert.equal(syncSelected(new Map([['1',blue]])).selectedFeature, blue);
+  assert.equal(detailsState.details.properties.GLS, 4);
+  assert.equal(detailsState.details.properties['Grain Yield predicted'], 3.214527);
+  assert.equal(detailsState.hidden, 1);
+  syncSelected(new Map([['1',blue]]));
+  assert.equal(detailsState.renders, 1);
+  assert.equal(syncSelected(new Map()).selectedFeature, null);
+  assert.equal(detailsState.details, null);
+
   // Map setup can populate the cache before saved-model color mode is active.
   const cacheState = { categorical: false, id: '' };
   const getCache = new Function('state', `

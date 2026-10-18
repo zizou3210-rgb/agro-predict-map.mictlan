@@ -1289,7 +1289,12 @@ def _build_manual_grid_categorical_label(
 ) -> str:
     name = str(properties.get("Name") or "").strip()
     normalized_selected_id_header = str(selected_id_header or "").strip()
-    selected_id_value = str(properties.get(normalized_selected_id_header) or "").strip() if normalized_selected_id_header else ""
+    raw_selected_id_value = properties.get(normalized_selected_id_header) if normalized_selected_id_header else None
+    selected_id_value = "" if raw_selected_id_value is None else str(raw_selected_id_value).strip()
+    # Zero is a valid category. Match the frontend's integer display labels,
+    # including identifiers read from Excel as floating-point numbers.
+    if re.fullmatch(r"-?\d+(?:\.0+)?", selected_id_value):
+        selected_id_value = str(int(selected_id_value.split(".", 1)[0]))
     if normalized_selected_id_header and name and selected_id_value:
         return f"{name} - {selected_id_value}"
     if multi_germplasm_mode and name:
