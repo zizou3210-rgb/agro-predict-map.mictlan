@@ -302,12 +302,13 @@ def run_grain_yield_prediction(
     model_dir: Path,
     selected_model_id: str | None = None,
     progress_callback=None,
+    csv_only=False,
 ) -> GrainYieldPredictionOutputs:
     model_dir.mkdir(parents=True, exist_ok=True)
     model_input_csv = model_dir / "grain_yield_model_input.csv"
     predictions_json = model_dir / "grain_yield_predictions.json"
     output_csv = model_dir / "phase5_with_predictions.csv"
-    output_xlsx = model_dir / "phase5_with_predictions.xlsx"
+    output_xlsx = output_csv if csv_only else model_dir / "phase5_with_predictions.xlsx"
 
     preparation = work_progress(progress_callback, 90, "Preparing saved model inputs", phase="phase05", unit="steps")
     preparation(0, 3)
@@ -336,7 +337,8 @@ def run_grain_yield_prediction(
     )
     predicted_df.insert(insert_at, PREDICTED_COLUMN, predictions)
     write_dataframe_csv(predicted_df, output_csv, work_progress(progress_callback, 96, "Saving model predictions CSV", phase="phase05") if progress_callback else None)
-    write_dataframe_excel(predicted_df, output_xlsx, work_progress(progress_callback, 96, "Saving model predictions workbook", phase="phase05", unit="cells") if progress_callback else None)
+    if not csv_only:
+        write_dataframe_excel(predicted_df, output_xlsx, work_progress(progress_callback, 96, "Saving model predictions workbook", phase="phase05", unit="cells") if progress_callback else None)
 
     return GrainYieldPredictionOutputs(
         dataframe=predicted_df,

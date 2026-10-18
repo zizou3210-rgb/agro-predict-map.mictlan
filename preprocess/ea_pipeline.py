@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from tabular_io import write_rows
+
 import argparse
 import calendar
 import csv
@@ -443,6 +445,8 @@ def normalize_key_value(value: object) -> str:
 
 
 def write_workbook(path: Path, sheet_name: str, headers: list[str], records: list[dict[str, object]], progress_callback=None) -> None:
+    if Path(path).suffix.lower() == ".csv":
+        return write_rows(path, headers, ([record.get(header) for header in headers] for record in records), len(records), progress_callback)
     workbook = Workbook(write_only=progress_callback is not None)
     worksheet = workbook.create_sheet() if progress_callback is not None else workbook.active
     worksheet.title = sheet_name

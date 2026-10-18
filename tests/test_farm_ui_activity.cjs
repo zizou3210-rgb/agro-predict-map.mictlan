@@ -26,3 +26,8 @@ render({ percent: 100, stage: 'Upload error', details: {}, activity: [{ stage: '
 assert.ok(activity.children[0].textContent.includes('98%'));
 assert.ok(activity.children[0].textContent.endsWith('error'));
 assert.ok(!activity.children[0].textContent.includes('finished'));
+const extensionStart = source.indexOf('const getPredictionOutputExtension =');
+const extensionEnd = source.indexOf(';', extensionStart) + 1;
+const getExtension = new Function(source.slice(extensionStart, extensionEnd) + '; return getPredictionOutputExtension;')();
+assert.equal(getExtension({ summary: { tabular_format: 'csv' } }), '.csv');
+assert.equal(getExtension({ summary: { tabular_format: 'xlsx' } }), '.xlsx');

@@ -141,6 +141,8 @@ def work_progress(callback, percent, stage, *, phase, unit="rows"):
 
 
 def write_dataframe_excel(df, output_file, progress_callback=None):
+    if Path(output_file).suffix.lower() == ".csv":
+        return write_dataframe_csv(df, output_file, progress_callback)
     if progress_callback is None:
         return df.to_excel(output_file, index=False)
     import pandas as pd

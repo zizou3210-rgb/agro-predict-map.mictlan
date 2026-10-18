@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+from tabular_io import read_dataframe
 from pipeline.progress import work_progress
 
 from ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
@@ -120,7 +121,7 @@ def run_ce_phase05(
 
     preparation = work_progress(progress_callback, 90, "Preparing saved model prediction", phase="phase05", unit="steps")
     preparation(0, 1)
-    phase04_df = pd.read_excel(phase04_workbook, dtype=object)
+    phase04_df = read_dataframe(phase04_workbook, dtype=object)
     phase04_df.columns = [str(column).strip() for column in phase04_df.columns]
     preparation(1, 1, True)
     phase04_df = ensure_country_column(phase04_df, progress_callback=work_progress(progress_callback, 90, "Resolving prediction countries", phase="phase05"))
@@ -139,6 +140,7 @@ def run_ce_phase05(
         run_dir / "model",
         selected_model_id=selected_model_id,
         progress_callback=progress_callback,
+        csv_only=phase04_workbook.suffix.lower() == ".csv",
     )
 
     selected_id_header = str(selected_id_header or "").strip()
@@ -200,6 +202,7 @@ def run_ce_phase05(
         prediction_with_geo,
         run_dir / "model",
         progress_callback=progress_callback,
+        csv_only=phase04_workbook.suffix.lower() == ".csv",
     )
     geojson_file = run_dir / "model" / "ce_phase05_with_predictions.geojson"
     geojson = dataframe_to_geojson(prediction_with_geo, geojson_file, progress_callback=work_progress(progress_callback, 99, "Preparing map output", phase="phase05"))
@@ -218,7 +221,7 @@ def run_ce_phase05(
         "canonical_target_column": CANONICAL_TARGET_COLUMN,
         "phase04_xlsx": str(phase04_workbook),
         "phase04_training_csv": str(training_input_csv),
-        "phase04_training_xlsx": str(training_input_csv.with_suffix(".xlsx")),
+        "phase04_training_xlsx": str(training_input_csv if phase04_workbook.suffix.lower() == ".csv" else training_input_csv.with_suffix(".xlsx")),
         "model_input_csv": str(prediction.model_input_csv),
         "prediction_csv": str(combined_prediction_csv),
         "prediction_xlsx": str(combined_prediction_xlsx),

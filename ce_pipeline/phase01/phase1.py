@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from tabular_io import read_records, write_rows
+
 import argparse
 import json
 from pathlib import Path
@@ -111,6 +113,8 @@ def _extract_cell_value(cell: ET.Element, shared_strings: list[str]) -> str:
 
 
 def read_sheet_headers_and_rows(workbook_path: Path, progress_callback=None) -> tuple[list[str], list[dict[str, str]]]:
+    if Path(workbook_path).suffix.lower() == ".csv":
+        return read_records(workbook_path, progress_callback)
     with ZipFile(workbook_path) as workbook_archive:
         shared_strings = _read_shared_strings(workbook_archive)
         sheet_path = _resolve_first_sheet_path(workbook_archive)
@@ -291,6 +295,8 @@ def write_xlsx_rows(
     data_row_count: int,
     progress_callback=None,
 ) -> None:
+    if Path(output_file).suffix.lower() == ".csv":
+        return write_rows(output_file, headers, rows, data_row_count, progress_callback)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     if progress_callback:
         progress_callback(0, data_row_count)
@@ -321,7 +327,7 @@ def write_xlsx_rows(
 
 
 def write_xlsx(output_file: Path, headers: list[str], records: list[dict[str, str]], progress_callback=None) -> None:
-    if progress_callback is not None:
+    if progress_callback is not None or Path(output_file).suffix.lower() == ".csv":
         return write_xlsx_rows(output_file, headers, ([record.get(header, "") for header in headers] for record in records), len(records), progress_callback=progress_callback)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     sheet_xml = build_sheet_xml(headers, records)

@@ -1593,10 +1593,15 @@ def _build_manual_grid_prediction_workbook_bytes(summary: dict[str, object]) -> 
             row.append(properties.get(key, ""))
         rows.append(row)
 
-    workbook_bytes = _build_simple_xlsx_bytes(headers, rows)
     source_name = Path(str(summary.get("source_name", "") or "prediction_output").strip() or "prediction_output").stem
-    file_name = f"{source_name}_prediction_cells.xlsx"
-    return workbook_bytes, file_name
+    if summary.get("tabular_format") == "csv":
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        writer.writerows(rows)
+        return buffer.getvalue().encode("utf-8"), f"{source_name}_prediction_cells.csv"
+    workbook_bytes = _build_simple_xlsx_bytes(headers, rows)
+    return workbook_bytes, f"{source_name}_prediction_cells.xlsx"
 
 
 def _build_manual_grid_special_surface(
@@ -2444,12 +2449,25 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def read_text_header(self, name: str, default: str = "") -> str:
+        value = self.headers.get(name, default)
+        if self.headers.get("X-Upload-Header-Encoding", "") != "uri-component-v1":
+            return value
+        from urllib.parse import unquote
+        try:
+            decoded = unquote(value, encoding="utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"Invalid UTF-8 encoding in upload header {name}.") from error
+        if any(character in decoded for character in ("\r", "\n", "\0")):
+            raise ValueError(f"Invalid control character in upload header {name}.")
+        return decoded
+
     def read_upload_request(self) -> tuple[str, bytes]:
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
             raise ValueError("The request body is empty.")
 
-        source_name = self.headers.get("X-File-Name", "uploaded.xlsx").strip() or "uploaded.xlsx"
+        source_name = self.read_text_header("X-File-Name", "uploaded.xlsx").strip() or "uploaded.xlsx"
         if not source_name.lower().endswith(".xlsx"):
             raise ValueError("Only .xlsx files are supported.")
         return source_name, self.rfile.read(content_length)
@@ -2467,7 +2485,7 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         return payload
 
     def parse_selected_germplasm_names_header(self) -> list[str]:
-        raw_value = self.headers.get("X-Selected-Germplasm-Names", "").strip()
+        raw_value = self.read_text_header("X-Selected-Germplasm-Names", "").strip()
         if not raw_value:
             return []
         parsed = json.loads(raw_value)
@@ -2477,7 +2495,7 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         return names
 
     def parse_json_list_header(self, header_name: str) -> list[str]:
-        raw_value = self.headers.get(header_name, "").strip()
+        raw_value = self.read_text_header(header_name, "").strip()
         if not raw_value:
             return []
         parsed = json.loads(raw_value)
@@ -2487,11 +2505,11 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
 
     def parse_selected_germplasm_selection_mode_header(self) -> str:
-        value = self.headers.get("X-Selected-Germplasm-Selection-Mode", "").strip() or "all_matches"
+        value = self.read_text_header("X-Selected-Germplasm-Selection-Mode", "").strip() or "all_matches"
         return "first_match_only" if value == "first_match_only" else "all_matches"
 
     def parse_use_source_row_dates_header(self) -> bool:
-        value = self.headers.get("X-Use-Source-Row-Dates", "").strip().lower()
+        value = self.read_text_header("X-Use-Source-Row-Dates", "").strip().lower()
         if value in {"0", "false", "no"}:
             return False
         return True
@@ -2693,26 +2711,26 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_start_process_xlsx(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        selected_model_id = self.headers.get("X-Selected-Model-Id", "").strip()
+        selected_model_id = self.read_text_header("X-Selected-Model-Id", "").strip()
         selected_germplasm_names = self.parse_selected_germplasm_names_header()
         selected_germplasm_row_ids = self.parse_json_list_header("X-Selected-Germplasm-Row-Ids")
-        selected_germplasm_projection_mode = self.headers.get(
+        selected_germplasm_projection_mode = self.read_text_header(
             "X-Selected-Germplasm-Projection-Mode", ""
         ).strip()
         selected_germplasm_selection_mode = self.parse_selected_germplasm_selection_mode_header()
-        projection_template_workbook = self.headers.get("X-Projection-Template-Workbook", "").strip()
-        forecast_planting_date = self.headers.get("X-Forecast-Planting-Date", "").strip()
-        forecast_harvesting_date = self.headers.get("X-Forecast-Harvesting-Date", "").strip()
-        pause_after_preprocess = self.headers.get("X-Pause-After-Preprocess", "").strip() == "1"
-        climate_scope = self.headers.get("X-Climate-Scope", "point").strip() or "point"
-        regional_country = self.headers.get("X-Regional-Country", "").strip()
-        regional_bounds_label = self.headers.get("X-Regional-Bounds-Label", "").strip()
-        regional_bounds_latitude_min = self.headers.get("X-Regional-Bounds-Latitude-Min", "").strip()
-        regional_bounds_latitude_max = self.headers.get("X-Regional-Bounds-Latitude-Max", "").strip()
-        regional_bounds_longitude_min = self.headers.get("X-Regional-Bounds-Longitude-Min", "").strip()
-        regional_bounds_longitude_max = self.headers.get("X-Regional-Bounds-Longitude-Max", "").strip()
-        nasa_grid_resolution_km = self.headers.get("X-Nasa-Grid-Resolution-Km", "").strip()
-        selected_id_header = self.headers.get("X-Selected-Id-Header", "").strip()
+        projection_template_workbook = self.read_text_header("X-Projection-Template-Workbook", "").strip()
+        forecast_planting_date = self.read_text_header("X-Forecast-Planting-Date", "").strip()
+        forecast_harvesting_date = self.read_text_header("X-Forecast-Harvesting-Date", "").strip()
+        pause_after_preprocess = self.read_text_header("X-Pause-After-Preprocess", "").strip() == "1"
+        climate_scope = self.read_text_header("X-Climate-Scope", "point").strip() or "point"
+        regional_country = self.read_text_header("X-Regional-Country", "").strip()
+        regional_bounds_label = self.read_text_header("X-Regional-Bounds-Label", "").strip()
+        regional_bounds_latitude_min = self.read_text_header("X-Regional-Bounds-Latitude-Min", "").strip()
+        regional_bounds_latitude_max = self.read_text_header("X-Regional-Bounds-Latitude-Max", "").strip()
+        regional_bounds_longitude_min = self.read_text_header("X-Regional-Bounds-Longitude-Min", "").strip()
+        regional_bounds_longitude_max = self.read_text_header("X-Regional-Bounds-Longitude-Max", "").strip()
+        nasa_grid_resolution_km = self.read_text_header("X-Nasa-Grid-Resolution-Km", "").strip()
+        selected_id_header = self.read_text_header("X-Selected-Id-Header", "").strip()
         use_source_row_dates = self.parse_use_source_row_dates_header()
         run_id, run_dir = self.create_pipeline_job(
             source_name,
@@ -3221,18 +3239,18 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_process_xlsx(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        selected_model_id = self.headers.get("X-Selected-Model-Id", "").strip()
+        selected_model_id = self.read_text_header("X-Selected-Model-Id", "").strip()
         selected_germplasm_names = self.parse_selected_germplasm_names_header()
-        forecast_planting_date = self.headers.get("X-Forecast-Planting-Date", "").strip()
-        forecast_harvesting_date = self.headers.get("X-Forecast-Harvesting-Date", "").strip()
-        pause_after_preprocess = self.headers.get("X-Pause-After-Preprocess", "").strip() == "1"
-        climate_scope = self.headers.get("X-Climate-Scope", "point").strip() or "point"
-        regional_country = self.headers.get("X-Regional-Country", "").strip()
-        regional_bounds_label = self.headers.get("X-Regional-Bounds-Label", "").strip()
-        regional_bounds_latitude_min = self.headers.get("X-Regional-Bounds-Latitude-Min", "").strip()
-        regional_bounds_latitude_max = self.headers.get("X-Regional-Bounds-Latitude-Max", "").strip()
-        regional_bounds_longitude_min = self.headers.get("X-Regional-Bounds-Longitude-Min", "").strip()
-        regional_bounds_longitude_max = self.headers.get("X-Regional-Bounds-Longitude-Max", "").strip()
+        forecast_planting_date = self.read_text_header("X-Forecast-Planting-Date", "").strip()
+        forecast_harvesting_date = self.read_text_header("X-Forecast-Harvesting-Date", "").strip()
+        pause_after_preprocess = self.read_text_header("X-Pause-After-Preprocess", "").strip() == "1"
+        climate_scope = self.read_text_header("X-Climate-Scope", "point").strip() or "point"
+        regional_country = self.read_text_header("X-Regional-Country", "").strip()
+        regional_bounds_label = self.read_text_header("X-Regional-Bounds-Label", "").strip()
+        regional_bounds_latitude_min = self.read_text_header("X-Regional-Bounds-Latitude-Min", "").strip()
+        regional_bounds_latitude_max = self.read_text_header("X-Regional-Bounds-Latitude-Max", "").strip()
+        regional_bounds_longitude_min = self.read_text_header("X-Regional-Bounds-Longitude-Min", "").strip()
+        regional_bounds_longitude_max = self.read_text_header("X-Regional-Bounds-Longitude-Max", "").strip()
         run_id, run_dir = self.create_pipeline_job(
             source_name,
             file_bytes,
@@ -3303,7 +3321,7 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             if cell_level_workbook is not None:
                 workbook_bytes, filename = cell_level_workbook
                 self.send_response(200)
-                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Type", "text/csv; charset=utf-8" if filename.lower().endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 self.send_header(
                     "Content-Disposition",
                     f'attachment; filename="{filename}"',
@@ -3643,10 +3661,10 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_germplasm_options(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        selected_model_id = self.headers.get("X-Selected-Model-Id", "").strip()
-        climate_scope = self.headers.get("X-Climate-Scope", "regional_manual").strip() or "regional_manual"
-        selected_id_header = self.headers.get("X-Selected-Id-Header", "").strip()
-        prediction_mode = self.headers.get("X-Prediction-Germplasm-Mode", "").strip().lower()
+        selected_model_id = self.read_text_header("X-Selected-Model-Id", "").strip()
+        climate_scope = self.read_text_header("X-Climate-Scope", "regional_manual").strip() or "regional_manual"
+        selected_id_header = self.read_text_header("X-Selected-Id-Header", "").strip()
+        prediction_mode = self.read_text_header("X-Prediction-Germplasm-Mode", "").strip().lower()
         PIPELINE_RUNS_DIR.mkdir(parents=True, exist_ok=True)
         preview_dir = PIPELINE_RUNS_DIR / f"preview-{uuid.uuid4().hex[:8]}"
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -3714,9 +3732,9 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_selecction_properties_preview(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        target_column = self.headers.get("X-Target-Column", "").strip()
-        latitude_column = self.headers.get("X-Latitude-Column", "").strip()
-        longitude_column = self.headers.get("X-Longitude-Column", "").strip()
+        target_column = self.read_text_header("X-Target-Column", "").strip()
+        latitude_column = self.read_text_header("X-Latitude-Column", "").strip()
+        longitude_column = self.read_text_header("X-Longitude-Column", "").strip()
         if not target_column:
             raise ValueError("Select a target variable before previewing the workbook.")
         if not latitude_column or not longitude_column:
@@ -3757,18 +3775,18 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_selecction_properties_summary(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        target_column = self.headers.get("X-Target-Column", "").strip()
-        latitude_column = self.headers.get("X-Latitude-Column", "").strip()
-        longitude_column = self.headers.get("X-Longitude-Column", "").strip()
-        planting_date_column = self.headers.get("X-Planting-Date-Column", "").strip()
-        harvesting_date_column = self.headers.get("X-Harvesting-Date-Column", "").strip()
-        soil_texture_column = self.headers.get("X-Soil-Texture-Column", "").strip()
-        soil_depth_column = self.headers.get("X-Soil-Depth-Column", "").strip()
+        target_column = self.read_text_header("X-Target-Column", "").strip()
+        latitude_column = self.read_text_header("X-Latitude-Column", "").strip()
+        longitude_column = self.read_text_header("X-Longitude-Column", "").strip()
+        planting_date_column = self.read_text_header("X-Planting-Date-Column", "").strip()
+        harvesting_date_column = self.read_text_header("X-Harvesting-Date-Column", "").strip()
+        soil_texture_column = self.read_text_header("X-Soil-Texture-Column", "").strip()
+        soil_depth_column = self.read_text_header("X-Soil-Depth-Column", "").strip()
         identifier_columns = self.parse_json_list_header("X-Identifier-Columns")
         categorical_columns = self.parse_json_list_header("X-Categorical-Columns")
         quantitative_columns = self.parse_json_list_header("X-Quantitative-Columns")
         no_defined_columns = self.parse_json_list_header("X-No-Defined-Columns")
-        workspace_name = self.headers.get("X-Workspace-Name", "").strip()
+        workspace_name = self.read_text_header("X-Workspace-Name", "").strip()
         if not all([target_column, latitude_column, longitude_column, planting_date_column, harvesting_date_column, soil_texture_column, soil_depth_column]):
             raise ValueError("Complete Initial Settings before executing Summary.")
         if not identifier_columns:

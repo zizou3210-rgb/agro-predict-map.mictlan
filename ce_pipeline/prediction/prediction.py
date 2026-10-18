@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+from tabular_io import read_dataframe, read_headers, estimated_manual_grid_rows, csv_threshold
 from pipeline.progress import work_progress, write_dataframe_excel, write_dataframe_csv, reported_operation
 from openpyxl import load_workbook
 
@@ -185,6 +186,8 @@ def build_required_division_headers(selection_summary: dict[str, object]) -> lis
 
 
 def _read_workbook_headers(workbook_path: Path) -> list[str]:
+    if Path(workbook_path).suffix.lower() == ".csv":
+        return read_headers(workbook_path)
     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
     try:
         worksheet = workbook.worksheets[0]
@@ -727,7 +730,7 @@ def _filter_prediction_output_files_by_profile_keys(
     allowed_profile_keys: set[str],
 ) -> None:
     if allowed_profile_keys and prediction_xlsx.exists():
-        prediction_df = pd.read_excel(prediction_xlsx)
+        prediction_df = read_dataframe(prediction_xlsx)
         if PREDICTION_PROFILE_KEY_HEADER in prediction_df.columns:
             filtered_df = prediction_df[
                 prediction_df[PREDICTION_PROFILE_KEY_HEADER]
@@ -984,7 +987,7 @@ def _sort_prediction_output_files(
     progress_callback=None,
 ) -> None:
     if prediction_xlsx.exists():
-        prediction_df = reported_operation(progress_callback, 99, "Reading Farm prediction workbook for sorting", "phase05", lambda: pd.read_excel(prediction_xlsx))
+        prediction_df = reported_operation(progress_callback, 99, "Reading Farm prediction workbook for sorting", "phase05", lambda: read_dataframe(prediction_xlsx))
         sorting = work_progress(progress_callback, 99, "Sorting Farm prediction results", phase="phase05", unit="steps")
         sorting(0, 1)
         prediction_df = _prepare_prediction_output_dataframe_for_display(
@@ -1103,9 +1106,9 @@ def _restore_selected_id_column_in_phase04_workbook(
 
     loading = work_progress(progress_callback, 88, "Loading identifier restoration workbooks", phase="phase04", unit="files")
     loading(0, 2)
-    phase03_df = pd.read_excel(phase03_workbook, dtype=object)
+    phase03_df = read_dataframe(phase03_workbook, dtype=object)
     loading(1, 2)
-    phase04_df = pd.read_excel(phase04_workbook, dtype=object)
+    phase04_df = read_dataframe(phase04_workbook, dtype=object)
     loading(2, 2, True)
     phase03_df.columns = [str(column).strip() for column in phase03_df.columns]
     phase04_df.columns = [str(column).strip() for column in phase04_df.columns]
@@ -1132,7 +1135,7 @@ def _restore_selected_id_column_in_phase04_workbook(
     restoring(1, 1, True)
     write_dataframe_excel(
         phase04_df, phase04_workbook,
-        work_progress(progress_callback, 88, "Saving restored identifier workbook", phase="phase04", unit="cells"),
+        work_progress(progress_callback, 88, "Saving restored identifier CSV" if phase04_workbook.suffix.lower() == ".csv" else "Saving restored identifier workbook", phase="phase04", unit="rows" if phase04_workbook.suffix.lower() == ".csv" else "cells"),
     )
 
 
@@ -1350,7 +1353,13 @@ def run_ce_saved_model_prediction(
         encoding="utf-8",
     )
 
-    phase03_prediction_path = phase03_dir / "phase03prediction.xlsx"
+    projection_headers, projection_records = read_sheet_headers_and_rows(phase02_prediction_path)
+    if not use_source_row_dates:
+        from preprocess.ea_pipeline import collapse_records_for_locality_projection
+        projection_records = collapse_records_for_locality_projection(projection_records)
+    estimated_rows = estimated_manual_grid_rows(len(projection_records), (regional_bounds_latitude_min, regional_bounds_latitude_max, regional_bounds_longitude_min, regional_bounds_longitude_max), nasa_grid_resolution_km)
+    table_format = "csv" if estimated_rows >= csv_threshold() or estimated_rows * len(projection_headers) >= 5_000_000 else "xlsx"
+    phase03_prediction_path = phase03_dir / f"phase03prediction.{table_format}"
     phase03_log_path = phase03_dir / "phase03prediction_log.json"
     phase03_log = create_phase03_workbook(
         phase02_prediction_path,
@@ -1362,6 +1371,7 @@ def run_ce_saved_model_prediction(
         progress_callback=progress_callback,
         climate_override={
             "climate_scope": "regional_manual",
+            "tabular_format": table_format,
             "forecast_years_back": 5,
             "selected_model_id": selected_model_id,
             "regional_bounds_label": regional_bounds_label,
@@ -1384,7 +1394,7 @@ def run_ce_saved_model_prediction(
             None,
         )
 
-    phase04_prediction_path = phase04_dir / "phase04prediction.xlsx"
+    phase04_prediction_path = phase04_dir / f"phase04prediction.{table_format}"
     phase04_log_path = phase04_dir / "phase04prediction_log.json"
     phase04_log = create_phase04_workbook(
         phase03_prediction_path,
@@ -1417,7 +1427,7 @@ def run_ce_saved_model_prediction(
         progress_callback=progress_callback,
     )
 
-    final_prediction_xlsx = ce_dir / "prediction.xlsx"
+    final_prediction_xlsx = ce_dir / f"prediction.{table_format}"
     final_prediction_csv = ce_dir / "prediction.csv"
     display_geojson_file = ce_dir / "prediction_display.geojson"
     initial_settings = selection_summary.get("initial_settings", {}) if isinstance(selection_summary, dict) else {}
@@ -1427,13 +1437,13 @@ def run_ce_saved_model_prediction(
     ):
         phase05_prediction_csv = Path(phase05_outputs.summary["prediction_csv"])
         if phase05_prediction_csv.exists():
-            final_prediction_df = reported_operation(progress_callback, 99, "Reading prediction results", "phase05", lambda: pd.read_csv(phase05_prediction_csv))
+            final_prediction_df = reported_operation(progress_callback, 99, "Reading prediction results", "phase05", lambda: read_dataframe(phase05_prediction_csv))
         else:
-            final_prediction_df = reported_operation(progress_callback, 99, "Reading prediction results", "phase05", lambda: pd.read_excel(Path(phase05_outputs.summary["prediction_xlsx"])))
+            final_prediction_df = reported_operation(progress_callback, 99, "Reading prediction results", "phase05", lambda: read_dataframe(Path(phase05_outputs.summary["prediction_xlsx"])))
     else:
         reported_operation(progress_callback, 99, "Copying final prediction workbook", "phase05", lambda: shutil.copy2(Path(phase05_outputs.summary["prediction_xlsx"]), final_prediction_xlsx))
         reported_operation(progress_callback, 99, "Copying final prediction CSV", "phase05", lambda: shutil.copy2(Path(phase05_outputs.summary["prediction_csv"]), final_prediction_csv))
-        final_prediction_df = reported_operation(progress_callback, 99, "Reading Farm prediction results", "phase05", lambda: pd.read_excel(final_prediction_xlsx))
+        final_prediction_df = reported_operation(progress_callback, 99, "Reading Farm prediction results", "phase05", lambda: read_dataframe(final_prediction_xlsx))
     if not _should_preserve_manual_grid_prediction_rows(
         climate_scope="regional_manual",
         selected_id_header=selected_id_header,
@@ -1461,7 +1471,8 @@ def run_ce_saved_model_prediction(
             final_prediction_df,
             manual_bbox_grid=(phase03_log.get("nasa", {}) if isinstance(phase03_log, dict) else {}).get("manual_bbox_grid"),
         )
-    write_dataframe_excel(final_prediction_df, final_prediction_xlsx, work_progress(progress_callback, 99, "Saving final prediction workbook", phase="phase05", unit="cells"))
+    if table_format != "csv":
+        write_dataframe_excel(final_prediction_df, final_prediction_xlsx, work_progress(progress_callback, 99, "Saving final prediction workbook", phase="phase05", unit="cells"))
     write_dataframe_csv(final_prediction_df, final_prediction_csv, work_progress(progress_callback, 99, "Saving final prediction CSV", phase="phase05"))
     geojson_source_df = (
         _build_lightweight_manual_grid_geojson_dataframe(
@@ -1523,6 +1534,10 @@ def run_ce_saved_model_prediction(
 
     summary = {
         "workflow": "ce_saved_model_prediction",
+        "tabular_format": table_format,
+        "estimated_expanded_rows": estimated_rows,
+        "phase03prediction_csv": str(phase03_prediction_path) if table_format == "csv" else "",
+        "phase04prediction_csv": str(phase04_prediction_path) if table_format == "csv" else "",
         "run_dir": str(run_dir),
         "input_workbook": str(uploaded_workbook),
         "selected_model_id": selected_model_id,

@@ -365,19 +365,20 @@ def create_phase04_workbook(
             output_headers,
             serializable_output_df.itertuples(index=False, name=None),
             int(serializable_output_df.shape[0]),
-            progress_callback=work_progress(progress_callback, 88, "Writing phase04prediction workbook", phase="phase04"),
+            progress_callback=work_progress(progress_callback, 88, "Writing phase04prediction CSV" if output_file.suffix.lower() == ".csv" else "Writing phase04prediction workbook", phase="phase04"),
         )
     else:
         output_records = serializable_output_df.to_dict(orient="records")
-        phase01.write_xlsx(output_file, output_headers, output_records, progress_callback=work_progress(progress_callback, 88, "Writing phase04prediction workbook", phase="phase04"))
+        phase01.write_xlsx(output_file, output_headers, output_records, progress_callback=work_progress(progress_callback, 88, "Writing phase04prediction CSV" if output_file.suffix.lower() == ".csv" else "Writing phase04prediction workbook", phase="phase04"))
     stem = output_file.stem
     selected_fields_csv = output_file.parent / f"{stem}_selected_fields.csv"
     write_dataframe_csv(output_df, selected_fields_csv, work_progress(progress_callback, 88, "Saving selected prediction fields CSV", phase="phase04"))
 
     training_csv = output_file.parent / f"{stem}_training_input.csv"
-    training_xlsx = output_file.parent / f"{stem}_training_input.xlsx"
+    training_xlsx = training_csv if output_file.suffix.lower() == ".csv" else output_file.parent / f"{stem}_training_input.xlsx"
     write_dataframe_csv(training_ready_df, training_csv, work_progress(progress_callback, 88, "Saving model-ready CSV", phase="phase04"))
-    write_dataframe_excel(training_ready_df, training_xlsx, work_progress(progress_callback, 88, "Saving model-ready workbook", phase="phase04", unit="cells"))
+    if training_xlsx != training_csv:
+        write_dataframe_excel(training_ready_df, training_xlsx, work_progress(progress_callback, 88, "Saving model-ready workbook", phase="phase04", unit="cells"))
     resolved_normalization_stats_file = normalization_stats_file or output_file.parent / f"{stem}_normalization_stats.json"
     resolved_normalization_stats_file.parent.mkdir(parents=True, exist_ok=True)
     resolved_normalization_stats_file.write_text(

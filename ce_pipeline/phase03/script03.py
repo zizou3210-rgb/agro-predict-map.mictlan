@@ -4046,16 +4046,16 @@ def build_phase02_records_parallel_workspace(
             joining_progress(len(phase02_records), len(source_records))
 
     joining_progress(len(source_records), len(source_records), True)
-    publish_phase03_progress(progress_file, progress_callback, 90, "Saving climate workbook",
+    publish_phase03_progress(progress_file, progress_callback, 90, "Saving climate CSV table" if str((climate_override or {}).get("tabular_format")) == "csv" else "Saving climate workbook",
                              f"Writing {len(phase02_records)} enriched rows to the climate workbook.")
     ea_pipeline.write_workbook(
-        output_dir / "phase02_climate_enriched.xlsx",
+        output_dir / ("phase02_climate_enriched.csv" if str((climate_override or {}).get("tabular_format")) == "csv" else "phase02_climate_enriched.xlsx"),
         "phase02_climate",
         phase02_headers,
         phase02_records,
         progress_callback=work_progress(
             lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
-            90, "Saving climate workbook", phase="phase03",
+            90, "Saving climate CSV table" if str((climate_override or {}).get("tabular_format")) == "csv" else "Saving climate workbook", phase="phase03",
         ),
     )
 
@@ -4565,11 +4565,11 @@ def create_phase03_workbook(
         merge_cleanup_metadata,
     )
 
-    publish_phase03_progress(progress_file, progress_callback, 97, "Saving climate and soil workbook",
+    publish_phase03_progress(progress_file, progress_callback, 97, "Saving climate and soil CSV" if output_file.suffix.lower() == ".csv" else "Saving climate and soil workbook",
                              f"Writing {len(phase03_records)} rows for the prediction flow.")
     workbook_progress = work_progress(
         lambda *args: publish_phase03_progress(progress_file, progress_callback, *args),
-        97, "Saving climate and soil workbook", phase="phase03",
+        97, "Saving climate and soil CSV" if output_file.suffix.lower() == ".csv" else "Saving climate and soil workbook", phase="phase03",
     )
     if climate_override and str(climate_override.get("climate_scope", "")).strip() == "regional_manual":
         phase01.write_xlsx_rows(
@@ -4614,7 +4614,7 @@ def create_phase03_workbook(
             "nasa_cache_file": str(local_nasa_cache_path),
             "nasa_cache_shared_file": str(shared_nasa_cache_path),
             "soil_cache_file": str(soil_cache_path),
-            "phase02_workbook_generated_by_preprocess_logic": str(output_dir / "phase02_climate_enriched.xlsx"),
+            "phase02_workbook_generated_by_preprocess_logic": str(output_dir / ("phase02_climate_enriched.csv" if str((climate_override or {}).get("tabular_format")) == "csv" else "phase02_climate_enriched.xlsx")),
             "weekly_windows_audit": str(output_dir / "weekly_windows_audit.csv"),
             "data_input_csv": str(output_dir / "dataInput.csv"),
             "output_csv": str(output_dir / "output.csv"),

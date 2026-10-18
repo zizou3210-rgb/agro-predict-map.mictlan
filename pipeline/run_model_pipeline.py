@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+from tabular_io import IDENTIFIER_COLUMN
 from pipeline.progress import work_progress, write_dataframe_excel, write_dataframe_csv
 
 from pipeline.common import dataframe_to_geojson
@@ -47,6 +48,8 @@ def coerce_numeric_like_columns(df: pd.DataFrame, progress_callback=None) -> pd.
     for completed, column in enumerate(normalized.columns, 1):
         if progress_callback:
             progress_callback(completed - 1, len(normalized.columns))
+        if IDENTIFIER_COLUMN.search(str(column)):
+            continue
         series = normalized[column]
         if not pd.api.types.is_object_dtype(series) and not pd.api.types.is_string_dtype(series):
             continue
@@ -69,12 +72,13 @@ def normalize_prediction_output_values(df: pd.DataFrame, progress_callback=None)
     return normalized
 
 
-def write_combined_prediction_outputs(prediction_with_geo, model_dir: Path, progress_callback=None) -> tuple[Path, Path]:
+def write_combined_prediction_outputs(prediction_with_geo, model_dir: Path, progress_callback=None, csv_only=False) -> tuple[Path, Path]:
     combined_csv = model_dir / "prediction_with_context.csv"
-    combined_xlsx = model_dir / "prediction_with_context.xlsx"
+    combined_xlsx = combined_csv if csv_only else model_dir / "prediction_with_context.xlsx"
     normalized_prediction = normalize_prediction_output_values(prediction_with_geo, work_progress(progress_callback, 98, "Normalizing prediction export fields", phase="phase05", unit="columns") if progress_callback else None)
     write_dataframe_csv(normalized_prediction, combined_csv, work_progress(progress_callback, 98, "Saving prediction context CSV", phase="phase05") if progress_callback else None)
-    write_dataframe_excel(normalized_prediction, combined_xlsx, work_progress(progress_callback, 98, "Saving prediction context workbook", phase="phase05", unit="cells") if progress_callback else None)
+    if not csv_only:
+        write_dataframe_excel(normalized_prediction, combined_xlsx, work_progress(progress_callback, 98, "Saving prediction context workbook", phase="phase05", unit="cells") if progress_callback else None)
     return combined_csv, combined_xlsx
 
 

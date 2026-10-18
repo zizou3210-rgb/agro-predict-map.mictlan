@@ -754,6 +754,8 @@ const resolvePredictionOutputDownloadUrl = (payload) => {
   return `/api/process-xlsx/artifact/${encodeURIComponent(jobId)}/prediction_output`;
 };
 
+const getPredictionOutputExtension = (payload) => payload?.summary?.tabular_format === "csv" ? ".csv" : ".xlsx";
+
 const getPredictionJobId = () => String(datasetStore.prediction?.summary?.job_id ?? "").trim();
 
 const buildManualGridOverlaySelectionKey = (labels) =>
@@ -3845,6 +3847,19 @@ const scheduleLoadingPanelReset = (delayMs = 5000) => {
   }, delayMs);
 };
 
+const encodeUploadHeaders = (headers = {}) => ({
+  ...Object.fromEntries(Object.entries(headers).map(([name, value]) => [
+    name,
+    name.toLowerCase().startsWith("x-") ? encodeURIComponent(String(value)) : value,
+  ])),
+  "X-Upload-Header-Encoding": "uri-component-v1",
+});
+
+const fetchUpload = (url, options) => fetch(url, {
+  ...options,
+  headers: encodeUploadHeaders(options.headers),
+});
+
 const startPipelineJob = async (
   file,
   {
@@ -3929,7 +3944,7 @@ const startPipelineJob = async (
     headers["X-Regional-Bounds-Longitude-Max"] = String(regionalBounds.longitudeMax ?? "");
     headers["X-Nasa-Grid-Resolution-Km"] = String(featureheroSettings.nasa_power_resolution_km ?? 5);
   }
-  const response = await fetch("/api/process-xlsx/start", {
+  const response = await fetchUpload("/api/process-xlsx/start", {
     method: "POST",
     headers,
     body: file,
@@ -3957,7 +3972,7 @@ const loadGermplasmOptions = async (file, { selectedIdHeader = "", mode = "uploa
   if (selectedIdHeader) {
     headers["X-Selected-Id-Header"] = selectedIdHeader;
   }
-  const response = await fetch("/api/process-xlsx/germplasm-options", {
+  const response = await fetchUpload("/api/process-xlsx/germplasm-options", {
     method: "POST",
     headers,
     body: file,
@@ -3972,7 +3987,7 @@ const loadGermplasmOptions = async (file, { selectedIdHeader = "", mode = "uploa
 };
 
 const loadOriginalDataPreview = async (file) => {
-  const response = await fetch("/api/process-xlsx/original-data", {
+  const response = await fetchUpload("/api/process-xlsx/original-data", {
     method: "POST",
     headers: {
       "Content-Type":
@@ -3992,7 +4007,7 @@ const loadOriginalDataPreview = async (file) => {
 
 
 const loadSelectionPropertiesMetadata = async (file) => {
-  const response = await fetch("/api/process-xlsx/selecction-properties", {
+  const response = await fetchUpload("/api/process-xlsx/selecction-properties", {
     method: "POST",
     headers: {
       "Content-Type":
@@ -4009,7 +4024,7 @@ const loadSelectionPropertiesMetadata = async (file) => {
 };
 
 const startSelectionPropertiesSummaryExecution = async (file, summarySelection) => {
-  const response = await fetch("/api/process-xlsx/selecction-properties/summary", {
+  const response = await fetchUpload("/api/process-xlsx/selecction-properties/summary", {
     method: "POST",
     headers: {
       "Content-Type":
@@ -4167,7 +4182,7 @@ const triggerSelectionPropertiesDownload = (downloadUrl, filename = "phase02.xls
 };
 
 const loadSelectionPropertiesPreview = async (file, selection) => {
-  const response = await fetch("/api/process-xlsx/selecction-properties/preview", {
+  const response = await fetchUpload("/api/process-xlsx/selecction-properties/preview", {
     method: "POST",
     headers: {
       "Content-Type":
@@ -9621,7 +9636,7 @@ const handleContinueAfterPreprocess = async () => {
     await sleepFrame();
     await triggerBrowserDownload(resolvePredictionOutputDownloadUrl(payload), {
       promptForFilename: false,
-      suggestedFilename: `${String(payload?.source_name ?? "high_potential_sites").replace(/\.[^./]+$/, "") || "high_potential_sites"}.xlsx`,
+      suggestedFilename: `${String(payload?.source_name ?? "high_potential_sites").replace(/\.[^./]+$/, "") || "high_potential_sites"}${getPredictionOutputExtension(payload)}`,
       bypassDownloadGate: true,
     });
     scheduleLoadingPanelReset();
@@ -9779,7 +9794,7 @@ const handleExecuteSelectedGermplasm = async () => {
     await sleepFrame();
     await triggerBrowserDownload(resolvePredictionOutputDownloadUrl(payload), {
       promptForFilename: false,
-      suggestedFilename: `${String(payload?.source_name ?? "high_potential_sites").replace(/\.[^./]+$/, "") || "high_potential_sites"}.xlsx`,
+      suggestedFilename: `${String(payload?.source_name ?? "high_potential_sites").replace(/\.[^./]+$/, "") || "high_potential_sites"}${getPredictionOutputExtension(payload)}`,
       bypassDownloadGate: true,
     });
     scheduleLoadingPanelReset();

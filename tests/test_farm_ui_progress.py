@@ -46,7 +46,9 @@ class FarmUiProgressTests(unittest.TestCase):
         self.assertEqual(actual_display['Farm'].tolist(), ['B'])
         self.assertEqual(events[-1][3]['stage_percent'], 100)
 
-    def test_farm_flow_reports_executed_processes_to_persisted_ui_history(self):
+    def _run_farm_flow(self, csv_mode=False):
+        environment = patch.dict('os.environ', {'APP_LARGE_TABLE_MIN_ROWS': '1' if csv_mode else '50000'})
+        environment.start()
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
             definition = {'initial_settings': {'target_column': 'Yield', 'longitude_column': 'Longitude', 'latitude_column': 'Latitude', 'planting_date_column': 'Planting', 'harvesting_date_column': 'Harvesting', 'soil_texture_column': 'SoilTexture', 'soil_depth_column': 'SoilDepth'}, 'divisions': {'germplams_identifiers': ['Name'], 'categorical_data': [], 'cuantitative_data': ['feature_a'], 'DG': []}}
@@ -66,15 +68,18 @@ class FarmUiProgressTests(unittest.TestCase):
                 headers = list(records[0])
                 write_xlsx(output, headers, records)
                 return {'nasa': {'climate_input_row_count': 2}, 'soil': {}}
-            def inference(csv_file, model_dir, selected_model_id=None, progress_callback=None):
+            def inference(csv_file, model_dir, selected_model_id=None, progress_callback=None, csv_only=False):
                 model_dir.mkdir(parents=True, exist_ok=True)
                 source = pd.read_csv(csv_file)
                 result = source.copy()
                 result['Grain Yield predicted'] = [4., 8.]
                 report = work_progress(progress_callback, 96, 'Running saved model prediction', phase='phase05')
                 report(0, 2); report(2, 2, True)
-                output_csv, output_xlsx = model_dir / 'prediction.csv', model_dir / 'prediction.xlsx'
-                result.to_csv(output_csv, index=False); result.to_excel(output_xlsx, index=False)
+                output_csv = model_dir / 'prediction.csv'
+                output_xlsx = output_csv if csv_only else model_dir / 'prediction.xlsx'
+                result.to_csv(output_csv, index=False)
+                if not csv_only:
+                    result.to_excel(output_xlsx, index=False)
                 return GrainYieldPredictionOutputs(result, source, csv_file, output_csv, output_xlsx, 'test model', ['feature_a'], {'model_id': 'test'})
             try:
                 with patch.object(flow, '_resolve_saved_model', return_value=(SimpleNamespace(metadata={}, model_dir=root), definition, definition_path)), patch.object(flow, 'validate_saved_model_prediction_workbook'), patch.object(flow, 'create_phase03_workbook', side_effect=climate), patch('ce_pipeline.phase05.phase05.run_grain_yield_prediction', side_effect=inference):
@@ -82,6 +87,9 @@ class FarmUiProgressTests(unittest.TestCase):
                 history = json.loads((root / 'progress.json').read_text())['activity']
                 completed = {e['stage'] for e in history if e.get('details', {}).get('stage_percent') == 100}
                 expected = {'Reading Farm prediction input', 'Saving Farm prediction input', 'Normalizing fields', 'Standardizing metrics', 'Encoding categories', 'Saving model-ready workbook', 'Checking selected identifier', 'Preparing saved model prediction', 'Resolving prediction countries', 'Running saved model prediction', 'Merging prediction results', 'Normalizing merged prediction fields', 'Saving prediction context CSV', 'Saving prediction context workbook', 'Reading prediction results', 'Aggregating predictions by selected identifier', 'Saving final prediction workbook', 'Saving final prediction CSV', 'Selecting display predictions by grid cell', 'Preparing final map output', 'Preparing display grid', 'Saving prediction summary'}
+                if csv_mode:
+                    expected -= {'Saving model-ready workbook', 'Saving final prediction workbook', 'Saving prediction context workbook'}
+                    expected |= {'Saving model-ready CSV', 'Writing phase04prediction CSV'}
                 self.assertEqual(expected - completed, set())
                 self.assertGreater(len(history), 30)
                 self.assertTrue(all(e.get('status') == 'finished' for e in history))
@@ -89,6 +97,21 @@ class FarmUiProgressTests(unittest.TestCase):
                 self.assertTrue(outputs.summary_file.exists())
                 self.assertEqual(outputs.geojson['features'][0]['properties']['Farm'], 'B')
                 self.assertEqual(outputs.geojson['features'][0]['properties']['Grain Yield predicted'], 8.)
-                self.assertEqual(len(pd.read_csv(outputs.summary['prediction_csv'])), 2)
+                final_rows = pd.read_csv(outputs.summary['prediction_csv'])
+                self.assertEqual(len(final_rows), 2)
+                self.assertEqual(outputs.summary['tabular_format'], 'csv' if csv_mode else 'xlsx')
+                if csv_mode:
+                    self.assertEqual([p.name for p in (root / 'run').rglob('*.xlsx')], ['phase02prediction.xlsx'])
+                return outputs.geojson, final_rows[['Farm', 'Name', 'Grain Yield predicted']].to_dict(orient='records')
             finally:
                 reporter.close()
+                environment.stop()
+
+    def test_csv_and_excel_routes_return_the_same_map_and_farm_predictions(self):
+        legacy_map, legacy_rows = self._run_farm_flow(False)
+        csv_map, csv_rows = self._run_farm_flow(True)
+        self.assertEqual(legacy_map, csv_map)
+        self.assertEqual(legacy_rows, csv_rows)
+
+    def test_farm_flow_reports_executed_processes_to_persisted_ui_history(self):
+        self._run_farm_flow(False)
