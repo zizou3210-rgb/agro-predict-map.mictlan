@@ -318,6 +318,7 @@ const predictionMeanBanner = document.getElementById("prediction-mean-banner");
 const predictionMeanBannerValue = document.getElementById("prediction-mean-banner-value");
 const colorHelpPanel = document.getElementById("color-help-panel");
 const colorHelpList = document.getElementById("color-help-list");
+const downloadCurrentMapButton = document.getElementById("download-current-map");
 const colorHelpScale = document.getElementById("color-help-scale");
 const ACTIVE_PIPELINE_JOB_STORAGE_KEY = "mictlan-active-pipeline-job";
 const ACTIVE_PIPELINE_JOB_MAX_AGE_MS = 30 * 60 * 1000;
@@ -757,6 +758,19 @@ const resolvePredictionOutputDownloadUrl = (payload) => {
 const getPredictionOutputExtension = (payload) => payload?.summary?.tabular_format === "csv" ? ".csv" : ".xlsx";
 
 const getPredictionJobId = () => String(datasetStore.prediction?.summary?.job_id ?? "").trim();
+
+const getCurrentMapPredictionDownloadUrl = () => {
+  const jobId = getPredictionJobId();
+  if (!jobId) {
+    return "";
+  }
+  const query = new URLSearchParams();
+  if (predictionProfileSelectionTouched) {
+    getCheckedPredictionProfileLabels().forEach(label => query.append("labels", label));
+  }
+  const suffix = query.toString();
+  return `/api/process-xlsx/artifact/${encodeURIComponent(jobId)}/prediction_output${suffix ? `?${suffix}` : ""}`;
+};
 
 const buildManualGridOverlaySelectionKey = (labels) =>
   Array.from(labels ?? [])
@@ -1242,11 +1256,13 @@ const isMultiProfilePredictionResult = () =>
   Boolean(datasetStore.prediction?.summary?.multi_profile_mode);
 
 const getPredictionDistinctGermplasmNames = () => {
-  const summaryNames = Array.isArray(datasetStore.prediction?.summary?.manual_grid_prediction_names)
-    ? datasetStore.prediction.summary.manual_grid_prediction_names
-        .map((name) => String(name ?? "").trim())
-        .filter(Boolean)
-    : [];
+  const summary = datasetStore.prediction?.summary;
+  // Display features may contain only cell winners. Keep every run participant
+  // in the legend, including germplasms that did not win a cell.
+  const summaryNames = [
+    ...(Array.isArray(summary?.manual_grid_prediction_names) ? summary.manual_grid_prediction_names : []),
+    ...(Array.isArray(summary?.selected_germplasm_names) ? summary.selected_germplasm_names : []),
+  ].map((name) => String(name ?? "").trim()).filter(Boolean);
   if (summaryNames.length) {
     return Array.from(new Set(summaryNames));
   }
@@ -6608,28 +6624,34 @@ const runPredictionProfileInteractionWithLoading = async (action) => {
   if (typeof action !== "function") {
     return;
   }
-  if (predictionProfileInteractionInProgress) {
-    return;
-  }
   if (!(activeDataViewTab === "prediction" && isCategoricalPredictionColorMode())) {
     await Promise.resolve(action());
     return;
   }
+  // Apply every click, including clicks received while an overlay is loading.
+  const interactionAlreadyRunning = predictionProfileInteractionInProgress;
   predictionProfileInteractionInProgress = true;
+  if (interactionAlreadyRunning) {
+    await Promise.resolve(action());
+    return;
+  }
   try {
     await Promise.resolve(action());
-    const checkedLabels = getCheckedPredictionProfileLabels();
-    if (isManualGridPredictionResult() && predictionProfileSelectionTouched && checkedLabels.size > 0) {
+    while (isManualGridPredictionResult() && !hasManualGridCompetitionFeatures()) {
+      const checkedLabels = getCheckedPredictionProfileLabels();
+      if (!predictionProfileSelectionTouched || checkedLabels.size === 0) {
+        break;
+      }
       const selectionKey = buildManualGridOverlaySelectionKey(checkedLabels);
       activeManualGridServerOverlayKey = selectionKey;
       await ensureManualGridProfileOverlayForLabels(checkedLabels);
-      renderManualGridOverlay(currentTransform);
-    } else {
-      activeManualGridServerOverlayKey = "";
-      renderManualGridOverlay(currentTransform);
+      if (selectionKey === buildManualGridOverlaySelectionKey(getCheckedPredictionProfileLabels())) {
+        break;
+      }
     }
   } finally {
     predictionProfileInteractionInProgress = false;
+    renderManualGridOverlay(currentTransform);
   }
 };
 
@@ -7095,6 +7117,9 @@ const renderColorHelp = () => {
   }
 
   colorHelpPanel.hidden = items.length === 0;
+  if (downloadCurrentMapButton) {
+    downloadCurrentMapButton.hidden = !isManualGridPredictionResult() || !getPredictionJobId();
+  }
   colorHelpList.replaceChildren(...items.map(createColorHelpItem));
   if (colorHelpScale) {
     colorHelpScale.hidden = !showYieldScale || items.length === 0;
@@ -8445,11 +8470,15 @@ const getManualGridOverlayComputationState = (gridCells) => {
   const predictionGeojson = datasetStore.prediction?.geojson ?? null;
   const predictionRawGeojson = datasetStore.prediction?.rawGeojson ?? null;
   const predictionSummary = datasetStore.prediction?.summary ?? null;
+  const categoricalMode = isCategoricalPredictionColorMode();
+  const selectedIdHeader = getPredictionSelectedIdHeader();
   if (
     manualGridOverlayComputationCache &&
     manualGridOverlayComputationCache.predictionGeojson === predictionGeojson &&
     manualGridOverlayComputationCache.predictionRawGeojson === predictionRawGeojson &&
     manualGridOverlayComputationCache.predictionSummary === predictionSummary &&
+    manualGridOverlayComputationCache.categoricalMode === categoricalMode &&
+    manualGridOverlayComputationCache.selectedIdHeader === selectedIdHeader &&
     manualGridOverlayComputationCache.gridCells === gridCells
   ) {
     return manualGridOverlayComputationCache;
@@ -8528,6 +8557,8 @@ const getManualGridOverlayComputationState = (gridCells) => {
     predictionGeojson,
     predictionRawGeojson,
     predictionSummary,
+    categoricalMode,
+    selectedIdHeader,
     gridCells,
     normalizedGridCells,
     featureEntries,
@@ -8573,6 +8604,10 @@ const isHeavyFarmManualGridPrediction = () => {
   return featureCount <= 0 || gridCellCount <= 0 ? true : featureCount > gridCellCount;
 };
 
+const hasManualGridCompetitionFeatures = () =>
+  Array.isArray(datasetStore.prediction?.rawGeojson?.features) &&
+  datasetStore.prediction.rawGeojson.features.length > 0;
+
 const renderManualGridOverlay = (transform) => {
   if (!mapContext?.manualGridHeatLayer || !mapContext?.manualGridCellsLayer || !mapContext?.manualGridMarkersLayer) {
     return;
@@ -8611,7 +8646,7 @@ const renderManualGridOverlay = (transform) => {
       : activeProfileLabel
         ? `active:${normalizePredictionCategoryLabel(activeProfileLabel)}`
         : "all";
-    if (useCheckedLabels) {
+    if (useCheckedLabels && !hasManualGridCompetitionFeatures()) {
       const serverOverlayKey = buildManualGridOverlaySelectionKey(checkedLabels);
       const serverOverlayPayload = serverOverlayKey
         ? manualGridServerOverlayCache.get(serverOverlayKey) ?? null
@@ -9243,8 +9278,7 @@ const applyFeatureCollection = async (
   }
   markerGroups.classed("active", (datum) => datum === selectedFeature);
   if (isCategoricalPredictionColorMode()) {
-    const dominantLabel = getDominantPredictionProfileLabel();
-    setCheckedPredictionProfileLabels(dominantLabel ? [dominantLabel] : []);
+    setCheckedPredictionProfileLabels(getAvailablePredictionProfileSummaries().map(profile => profile.label));
     predictionProfileSelectionTouched = false;
     setActivePredictionProfileHighlight("");
   } else {
@@ -10632,6 +10666,12 @@ const init = async () => {
     await resumePersistedPipelineJob();
   }
 };
+
+downloadCurrentMapButton?.addEventListener("click", () => {
+  triggerBrowserDownload(getCurrentMapPredictionDownloadUrl(), {
+    suggestedFilename: `prediction_current_map${getPredictionOutputExtension(datasetStore.prediction)}`,
+  });
+});
 
 init().catch((error) => {
   console.error(error);

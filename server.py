@@ -1545,14 +1545,28 @@ def _build_simple_xlsx_bytes(headers: list[str], rows: list[list[object]]) -> by
     return output.getvalue()
 
 
-def _build_manual_grid_prediction_workbook_bytes(summary: dict[str, object]) -> tuple[bytes, str] | None:
+def _build_manual_grid_prediction_workbook_bytes(
+    summary: dict[str, object], selected_labels: list[str] | None = None,
+) -> tuple[bytes, str] | None:
     if str(summary.get("climate_scope", "")).strip() != "regional_manual":
         return None
     geojson = resolve_prediction_feature_collection(summary)
-    compact_geojson, _ = _build_manual_grid_prediction_payload(summary, geojson)
+    compact_geojson, distinct_names = _build_manual_grid_prediction_payload(summary, geojson)
     source_features = compact_geojson.get("features", []) if isinstance(compact_geojson, dict) else []
     if not isinstance(source_features, list) or not source_features:
         return None
+
+    selected_lookup = {_normalize_prediction_selection_label(label) for label in (selected_labels or [])}
+    if selected_lookup:
+        source_features = [
+            feature for feature in source_features
+            if _normalize_prediction_selection_label(_build_manual_grid_categorical_label(
+                feature.get("properties", {}),
+                selected_id_header=str(summary.get("selected_id_header") or "").strip(),
+                multi_profile_mode=bool(summary.get("multi_profile_mode")),
+                multi_germplasm_mode=len(distinct_names) > 1,
+            )) in selected_lookup
+        ]
 
     winners_by_cell: dict[str, dict[str, object]] = {}
     for feature in source_features:
@@ -3317,7 +3331,8 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
                 summary_path,
                 cache=PIPELINE_SUMMARY_CACHE,
             )
-            cell_level_workbook = _build_manual_grid_prediction_workbook_bytes(summary)
+            selected_labels = parse_qs(query or "").get("labels", [])
+            cell_level_workbook = _build_manual_grid_prediction_workbook_bytes(summary, selected_labels)
             if cell_level_workbook is not None:
                 workbook_bytes, filename = cell_level_workbook
                 self.send_response(200)
