@@ -318,7 +318,6 @@ const predictionMeanBanner = document.getElementById("prediction-mean-banner");
 const predictionMeanBannerValue = document.getElementById("prediction-mean-banner-value");
 const colorHelpPanel = document.getElementById("color-help-panel");
 const colorHelpList = document.getElementById("color-help-list");
-const downloadCurrentMapButton = document.getElementById("download-current-map");
 const colorHelpScale = document.getElementById("color-help-scale");
 const ACTIVE_PIPELINE_JOB_STORAGE_KEY = "mictlan-active-pipeline-job";
 const ACTIVE_PIPELINE_JOB_MAX_AGE_MS = 30 * 60 * 1000;
@@ -758,19 +757,6 @@ const resolvePredictionOutputDownloadUrl = (payload) => {
 const getPredictionOutputExtension = (payload) => payload?.summary?.tabular_format === "csv" ? ".csv" : ".xlsx";
 
 const getPredictionJobId = () => String(datasetStore.prediction?.summary?.job_id ?? "").trim();
-
-const getCurrentMapPredictionDownloadUrl = () => {
-  const jobId = getPredictionJobId();
-  if (!jobId) {
-    return "";
-  }
-  const query = new URLSearchParams();
-  if (predictionProfileSelectionTouched) {
-    getCheckedPredictionProfileLabels().forEach(label => query.append("labels", label));
-  }
-  const suffix = query.toString();
-  return `/api/process-xlsx/artifact/${encodeURIComponent(jobId)}/prediction_output${suffix ? `?${suffix}` : ""}`;
-};
 
 const buildManualGridOverlaySelectionKey = (labels) =>
   Array.from(labels ?? [])
@@ -7120,9 +7106,6 @@ const renderColorHelp = () => {
   }
 
   colorHelpPanel.hidden = items.length === 0;
-  if (downloadCurrentMapButton) {
-    downloadCurrentMapButton.hidden = !isManualGridPredictionResult() || !getPredictionJobId();
-  }
   colorHelpList.replaceChildren(...items.map(createColorHelpItem));
   if (colorHelpScale) {
     colorHelpScale.hidden = !showYieldScale || items.length === 0;
@@ -10685,12 +10668,6 @@ const init = async () => {
     await resumePersistedPipelineJob();
   }
 };
-
-downloadCurrentMapButton?.addEventListener("click", () => {
-  triggerBrowserDownload(getCurrentMapPredictionDownloadUrl(), {
-    suggestedFilename: `prediction_current_map${getPredictionOutputExtension(datasetStore.prediction)}`,
-  });
-});
 
 init().catch((error) => {
   console.error(error);

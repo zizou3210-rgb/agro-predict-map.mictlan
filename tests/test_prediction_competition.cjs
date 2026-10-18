@@ -76,17 +76,6 @@ const createInteraction = new Function('state', `
   cacheState.id = 'Farm';
   assert.notEqual(getCache(), competitionCache);
 
-  const downloadState = { touched: false, labels: ['A', 'C'] };
-  const downloadUrl = new Function('state', `
-    const getPredictionJobId = () => 'run-1';
-    const getCheckedPredictionProfileLabels = () => new Set(state.labels);
-    ${extract('getCurrentMapPredictionDownloadUrl').replace('predictionProfileSelectionTouched', 'state.touched')}
-    return getCurrentMapPredictionDownloadUrl;
-  `)(downloadState);
-  assert.equal(downloadUrl(), '/api/process-xlsx/artifact/run-1/prediction_output');
-  downloadState.touched = true;
-  assert.deepEqual(new URL(downloadUrl(), 'http://localhost').searchParams.getAll('labels'), ['A', 'C']);
-
   const state = { hasRaw: true, labels: ['A'], rendered: [], fetch() { throw new Error('Local competition must not request the server'); } };
   const run = createInteraction(state);
   await run(() => { state.labels = ['C']; });
