@@ -1148,6 +1148,8 @@ const downloadMapScreenshot = async () => {
   const tileImages = Array.from(tilesContainer?.querySelectorAll("img.tile") ?? []);
   tileImages.forEach((image) => {
     const imageRect = image.getBoundingClientRect();
+    canvasContext.save();
+    canvasContext.filter = getComputedStyle(image).filter;
     canvasContext.drawImage(
       image,
       imageRect.left - frameRect.left,
@@ -1155,6 +1157,7 @@ const downloadMapScreenshot = async () => {
       imageRect.width,
       imageRect.height,
     );
+    canvasContext.restore();
   });
 
   await drawSvgOnCanvas(canvasContext, frameRect);
