@@ -160,12 +160,17 @@ def build_manual_grid_interpolated_surface(
     subdivisions_per_cell: int = 12,
     neighbor_count: int = 12,
     weight_power: float = 1.15,
+    maximum_interpolated_cells: int = 512,
 ) -> dict[str, Any]:
     valued_cells = _normalized_value_cells(grid_cells, predicted_lookup)
     valid_cell_count = len(valued_cells)
-    if valid_cell_count < minimum_valid_cells:
+    # Global kriging allocates quadratic matrices; IDW also scales quadratically
+    # and emits 144 samples per cell. Large grids already have cell predictions
+    # and must use the existing direct-grid overlay instead of blocking delivery.
+    if valid_cell_count < minimum_valid_cells or valid_cell_count > maximum_interpolated_cells:
         return {
             "method": "mean",
+            "reason": "grid_size_limit" if valid_cell_count > maximum_interpolated_cells else "insufficient_cells",
             "valid_cell_count": valid_cell_count,
             "sample_count": 0,
             "samples": [],

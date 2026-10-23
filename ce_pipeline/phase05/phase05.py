@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+from tabular_io import read_dataframe
+from pipeline.progress import work_progress
 
 from ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
 from pipeline.common import GEO_COLUMNS, GERMPLASM_COLUMNS, dataframe_to_geojson
@@ -70,18 +72,27 @@ def write_progress(
     progress_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def ensure_country_column(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_country_column(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
     if "Country" not in df.columns:
         df["Country"] = ""
     country_series = df["Country"].astype(str).str.strip()
     missing_mask = country_series.eq("")
+    missing_total = int(missing_mask.sum())
+    if progress_callback:
+        progress_callback(0, missing_total)
     if not missing_mask.any():
+        if progress_callback:
+            progress_callback(0, 0, True)
         return df
     latitudes = df.get("_GPS coordinates_latitude")
     longitudes = df.get("_GPS coordinates_longitude")
     if latitudes is None or longitudes is None:
+        if progress_callback:
+            progress_callback(missing_total, missing_total, True)
         return df
-    for index in df.index[missing_mask]:
+    for completed, index in enumerate(df.index[missing_mask], 1):
+        if progress_callback:
+            progress_callback(completed - 1, missing_total)
         latitude = _parse_coordinate(df.at[index, "_GPS coordinates_latitude"])
         longitude = _parse_coordinate(df.at[index, "_GPS coordinates_longitude"])
         if latitude is None or longitude is None:
@@ -89,6 +100,8 @@ def ensure_country_column(df: pd.DataFrame) -> pd.DataFrame:
         derived_country = _derive_country_from_coordinates(longitude, latitude)
         if derived_country:
             df.at[index, "Country"] = derived_country
+    if progress_callback:
+        progress_callback(missing_total, missing_total, True)
     return df
 
 
@@ -106,19 +119,14 @@ def run_ce_phase05(
 ) -> CePhase05Outputs:
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    phase04_df = pd.read_excel(phase04_workbook, dtype=object)
+    preparation = work_progress(progress_callback, 90, "Preparing saved model prediction", phase="phase05", unit="steps")
+    preparation(0, 1)
+    phase04_df = read_dataframe(phase04_workbook, dtype=object)
     phase04_df.columns = [str(column).strip() for column in phase04_df.columns]
-    phase04_df = ensure_country_column(phase04_df)
+    preparation(1, 1, True)
+    phase04_df = ensure_country_column(phase04_df, progress_callback=work_progress(progress_callback, 90, "Resolving prediction countries", phase="phase05"))
     if CANONICAL_TARGET_COLUMN not in phase04_df.columns:
         raise KeyError(f"Missing canonical target column in phase04 workbook: {CANONICAL_TARGET_COLUMN}")
-
-    if progress_callback:
-        progress_callback(
-            90,
-            "Preparing saved model prediction",
-            "Loading phase04prediction.xlsx and the selected Grain Yield model for inference.",
-            {"phase": "phase05", "input_rows": len(phase04_df.index)},
-        )
 
     write_progress(
         progress_file,
@@ -127,18 +135,12 @@ def run_ce_phase05(
         message="Using the ce_pipeline training input to generate the prediction dataset and map output.",
         details={"phase": "phase05", "target_column": target_column, "selected_model_id": selected_model_id or ""},
     )
-    if progress_callback:
-        progress_callback(
-            96,
-            "Running saved model prediction",
-            "Executing the selected Grain Yield model with the normalized prediction input.",
-            {"phase": "phase05", "target_column": target_column, "selected_model_id": selected_model_id or ""},
-        )
-
     prediction = run_grain_yield_prediction(
         training_input_csv,
         run_dir / "model",
         selected_model_id=selected_model_id,
+        progress_callback=progress_callback,
+        csv_only=phase04_workbook.suffix.lower() == ".csv",
     )
 
     selected_id_header = str(selected_id_header or "").strip()
@@ -191,14 +193,19 @@ def run_ce_phase05(
             "Joining the model predictions with geospatial and germplasm traceability columns.",
             {"phase": "phase05"},
         )
+    merging = work_progress(progress_callback, 98, "Merging prediction results", phase="phase05", unit="steps")
+    merging(0, 1)
     prediction_with_geo = combine_geo_and_prediction_dataframes(geo_df, prediction.dataframe)
-    prediction_with_geo = normalize_prediction_output_values(prediction_with_geo)
+    merging(1, 1, True)
+    prediction_with_geo = normalize_prediction_output_values(prediction_with_geo, work_progress(progress_callback, 98, "Normalizing merged prediction fields", phase="phase05", unit="columns"))
     combined_prediction_csv, combined_prediction_xlsx = write_combined_prediction_outputs(
         prediction_with_geo,
         run_dir / "model",
+        progress_callback=progress_callback,
+        csv_only=phase04_workbook.suffix.lower() == ".csv",
     )
     geojson_file = run_dir / "model" / "ce_phase05_with_predictions.geojson"
-    geojson = dataframe_to_geojson(prediction_with_geo, geojson_file)
+    geojson = dataframe_to_geojson(prediction_with_geo, geojson_file, progress_callback=work_progress(progress_callback, 99, "Preparing map output", phase="phase05"))
 
     write_progress(
         progress_file,
@@ -207,14 +214,6 @@ def run_ce_phase05(
         message="Building the ce_pipeline Prediction geojson with countries and predicted values.",
         details={"phase": "phase05", "target_column": target_column, "selected_model_id": selected_model_id or ""},
     )
-    if progress_callback:
-        progress_callback(
-            99,
-            "Preparing map output",
-            "Building the colored prediction map dataset and final GeoJSON output.",
-            {"phase": "phase05", "target_column": target_column, "selected_model_id": selected_model_id or ""},
-        )
-
     summary = {
         "workflow": "ce_pipeline_prediction",
         "source_name": source_name,
@@ -222,7 +221,7 @@ def run_ce_phase05(
         "canonical_target_column": CANONICAL_TARGET_COLUMN,
         "phase04_xlsx": str(phase04_workbook),
         "phase04_training_csv": str(training_input_csv),
-        "phase04_training_xlsx": str(training_input_csv.with_suffix(".xlsx")),
+        "phase04_training_xlsx": str(training_input_csv if phase04_workbook.suffix.lower() == ".csv" else training_input_csv.with_suffix(".xlsx")),
         "model_input_csv": str(prediction.model_input_csv),
         "prediction_csv": str(combined_prediction_csv),
         "prediction_xlsx": str(combined_prediction_xlsx),

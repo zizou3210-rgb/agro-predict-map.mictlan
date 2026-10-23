@@ -32,7 +32,7 @@ const minZoom = 2;
 const maxZoom = 17;
 const attributesPerPage = 10;
 const tileSize = 256;
-const tileUrlTemplate = "https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png";
+const tileUrlTemplate = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const requiredColumns = [
   "_GPS coordinates_latitude",
   "_GPS coordinates_longitude",
@@ -754,6 +754,8 @@ const resolvePredictionOutputDownloadUrl = (payload) => {
   return `/api/process-xlsx/artifact/${encodeURIComponent(jobId)}/prediction_output`;
 };
 
+const getPredictionOutputExtension = (payload) => payload?.summary?.tabular_format === "csv" ? ".csv" : ".xlsx";
+
 const getPredictionJobId = () => String(datasetStore.prediction?.summary?.job_id ?? "").trim();
 
 const buildManualGridOverlaySelectionKey = (labels) =>
@@ -1132,6 +1134,8 @@ const downloadMapScreenshot = async () => {
   const tileImages = Array.from(tilesContainer?.querySelectorAll("img.tile") ?? []);
   tileImages.forEach((image) => {
     const imageRect = image.getBoundingClientRect();
+    canvasContext.save();
+    canvasContext.filter = getComputedStyle(image).filter;
     canvasContext.drawImage(
       image,
       imageRect.left - frameRect.left,
@@ -1139,6 +1143,7 @@ const downloadMapScreenshot = async () => {
       imageRect.width,
       imageRect.height,
     );
+    canvasContext.restore();
   });
 
   await drawSvgOnCanvas(canvasContext, frameRect);
@@ -1240,11 +1245,13 @@ const isMultiProfilePredictionResult = () =>
   Boolean(datasetStore.prediction?.summary?.multi_profile_mode);
 
 const getPredictionDistinctGermplasmNames = () => {
-  const summaryNames = Array.isArray(datasetStore.prediction?.summary?.manual_grid_prediction_names)
-    ? datasetStore.prediction.summary.manual_grid_prediction_names
-        .map((name) => String(name ?? "").trim())
-        .filter(Boolean)
-    : [];
+  const summary = datasetStore.prediction?.summary;
+  // Display features may contain only cell winners. Keep every run participant
+  // in the legend, including germplasms that did not win a cell.
+  const summaryNames = [
+    ...(Array.isArray(summary?.manual_grid_prediction_names) ? summary.manual_grid_prediction_names : []),
+    ...(Array.isArray(summary?.selected_germplasm_names) ? summary.selected_germplasm_names : []),
+  ].map((name) => String(name ?? "").trim()).filter(Boolean);
   if (summaryNames.length) {
     return Array.from(new Set(summaryNames));
   }
@@ -3738,11 +3745,91 @@ const setLoadingState = async (percent, stage, message, visible = true) => {
     }
   }
   loadingPanel.hidden = !visible;
+  if (loadingStage.textContent !== stage) {
+    const detailLine = document.getElementById("loading-work-details");
+    if (detailLine) detailLine.textContent = "";
+  }
   loadingBarFill.style.width = `${percent}%`;
   loadingStage.textContent = stage;
   loadingPercent.textContent = formatLoadingPercentLabel(percent);
   loadingMessage.textContent = message;
   await sleepFrame();
+};
+
+let pipelineActivityIdentity = "";
+const renderPipelineProgress = (progress) => {
+  let detailLine = document.getElementById("loading-work-details");
+  if (!detailLine) {
+    detailLine = document.createElement("p");
+    detailLine.id = "loading-work-details";
+    loadingPanel.append(detailLine);
+    const activityPanel = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Process activity";
+    const list = document.createElement("ol");
+    list.id = "loading-activity";
+    list.style.maxHeight = "160px";
+    list.style.overflowY = "auto";
+    activityPanel.append(summary, list);
+    loadingPanel.append(activityPanel);
+  }
+  const details = progress.details ?? {};
+  let completed = details.stage_completed;
+  let total = details.stage_total;
+  let unit = details.stage_unit ?? "items";
+  // Old running jobs also benefit from the new presentation.
+  if (completed == null && progress.stage === "Enriching soils") {
+    completed = details.soil_unique_points_processed;
+    total = details.soil_unique_points_total;
+    unit = "points";
+  } else if (completed == null && details.climate_prefetch_tasks_total != null) {
+    completed = details.climate_prefetch_tasks_completed;
+    total = details.climate_prefetch_tasks_total;
+    unit = "files";
+  }
+  const knownTotal = Number.isFinite(Number(total)) && Number(total) > 0 && completed != null && Number.isFinite(Number(completed));
+  const stagePercent = details.stage_percent != null && Number.isFinite(Number(details.stage_percent))
+    ? Math.min(100, Math.max(0, Number(details.stage_percent)))
+    : knownTotal ? Math.min(100, Math.max(0, Number(completed) / Number(total) * 100)) : null;
+  const parts = [];
+  if (progress.percent != null && Number.isFinite(Number(progress.percent))) {
+    loadingPercent.textContent = `Total ${formatLoadingPercentLabel(Number(progress.percent))}`;
+  }
+  if (stagePercent != null) {
+    const stageLabel = stagePercent > 0 && stagePercent < 0.1
+      ? (stagePercent < 0.001 ? "<0.001%" : `${stagePercent.toFixed(3)}%`)
+      : formatLoadingPercentLabel(stagePercent);
+    parts.push(`Stage: ${stageLabel}`);
+    parts.push(`${Number(completed).toLocaleString()} / ${Number(total).toLocaleString()} ${unit}`);
+  }
+  const elapsed = progress.stage_elapsed_seconds ?? details.stage_elapsed_seconds;
+  if (elapsed != null) parts.push(`Elapsed: ${Math.round(Number(elapsed))}s`);
+  const eta = details.stage_eta_seconds;
+  if (eta != null && Number.isFinite(Number(eta))) parts.push(`Stage ETA: ${Math.round(Number(eta))}s`);
+  if (progress.updated_at) parts.push(`Last activity: ${new Date(progress.updated_at).toLocaleTimeString()}`);
+  if (details.soil_fallback_cells != null) parts.push(`Default soil values: ${Number(details.soil_fallback_cells).toLocaleString()} points`);
+  if (details.soil_persisted_points != null) parts.push(`Saved soil points: ${Number(details.soil_persisted_points).toLocaleString()}`);
+  if (details.soil_depth_default_cells != null) parts.push(`Default depth: ${Number(details.soil_depth_default_cells).toLocaleString()} points`);
+  detailLine.textContent = parts.join(" · ");
+  // The bar describes approximate workflow progress; the stage counter is exact
+  // completed work in the current stage, not an estimate of remaining wall time.
+  loadingBarFill.parentElement.title = "Approximate workflow progress";
+  const events = Array.isArray(progress.activity) ? progress.activity : [];
+  document.getElementById("loading-activity").parentElement.hidden = events.length === 0;
+  const identity = JSON.stringify(events);
+  if (identity !== pipelineActivityIdentity) {
+    pipelineActivityIdentity = identity;
+    const list = document.getElementById("loading-activity");
+    list.replaceChildren(...events.map((event) => {
+      const item = document.createElement("li");
+      const eventPercent = event.details?.stage_percent;
+      const progressLabel = eventPercent != null ? ` · ${formatLoadingPercentLabel(Number(eventPercent))}` : "";
+      const eventStatus = ["error", "cancelled"].includes(event.status)
+        ? event.status : event.ended_at ? "finished" : (event.status ?? "running");
+      item.textContent = `${new Date(event.started_at).toLocaleTimeString()} · ${event.stage}${progressLabel} · ${eventStatus}`;
+      return item;
+    }));
+  }
 };
 
 const scheduleLoadingPanelReset = (delayMs = 5000) => {
@@ -3764,6 +3851,19 @@ const scheduleLoadingPanelReset = (delayMs = 5000) => {
     );
   }, delayMs);
 };
+
+const encodeUploadHeaders = (headers = {}) => ({
+  ...Object.fromEntries(Object.entries(headers).map(([name, value]) => [
+    name,
+    name.toLowerCase().startsWith("x-") ? encodeURIComponent(String(value)) : value,
+  ])),
+  "X-Upload-Header-Encoding": "uri-component-v1",
+});
+
+const fetchUpload = (url, options) => fetch(url, {
+  ...options,
+  headers: encodeUploadHeaders(options.headers),
+});
 
 const startPipelineJob = async (
   file,
@@ -3849,7 +3949,7 @@ const startPipelineJob = async (
     headers["X-Regional-Bounds-Longitude-Max"] = String(regionalBounds.longitudeMax ?? "");
     headers["X-Nasa-Grid-Resolution-Km"] = String(featureheroSettings.nasa_power_resolution_km ?? 5);
   }
-  const response = await fetch("/api/process-xlsx/start", {
+  const response = await fetchUpload("/api/process-xlsx/start", {
     method: "POST",
     headers,
     body: file,
@@ -3877,7 +3977,7 @@ const loadGermplasmOptions = async (file, { selectedIdHeader = "", mode = "uploa
   if (selectedIdHeader) {
     headers["X-Selected-Id-Header"] = selectedIdHeader;
   }
-  const response = await fetch("/api/process-xlsx/germplasm-options", {
+  const response = await fetchUpload("/api/process-xlsx/germplasm-options", {
     method: "POST",
     headers,
     body: file,
@@ -3892,7 +3992,7 @@ const loadGermplasmOptions = async (file, { selectedIdHeader = "", mode = "uploa
 };
 
 const loadOriginalDataPreview = async (file) => {
-  const response = await fetch("/api/process-xlsx/original-data", {
+  const response = await fetchUpload("/api/process-xlsx/original-data", {
     method: "POST",
     headers: {
       "Content-Type":
@@ -3912,7 +4012,7 @@ const loadOriginalDataPreview = async (file) => {
 
 
 const loadSelectionPropertiesMetadata = async (file) => {
-  const response = await fetch("/api/process-xlsx/selecction-properties", {
+  const response = await fetchUpload("/api/process-xlsx/selecction-properties", {
     method: "POST",
     headers: {
       "Content-Type":
@@ -3929,7 +4029,7 @@ const loadSelectionPropertiesMetadata = async (file) => {
 };
 
 const startSelectionPropertiesSummaryExecution = async (file, summarySelection) => {
-  const response = await fetch("/api/process-xlsx/selecction-properties/summary", {
+  const response = await fetchUpload("/api/process-xlsx/selecction-properties/summary", {
     method: "POST",
     headers: {
       "Content-Type":
@@ -4013,6 +4113,7 @@ const pollSelectionPropertiesSummaryStatus = async (statusUrl, resultUrl = "") =
     setSelectionPropertiesBadge(stage);
     setSelectionPropertiesStatus(message);
     await setLoadingState(percent, stage, message, true);
+    renderPipelineProgress(progress);
 
     if (
       response.ok &&
@@ -4086,7 +4187,7 @@ const triggerSelectionPropertiesDownload = (downloadUrl, filename = "phase02.xls
 };
 
 const loadSelectionPropertiesPreview = async (file, selection) => {
-  const response = await fetch("/api/process-xlsx/selecction-properties/preview", {
+  const response = await fetchUpload("/api/process-xlsx/selecction-properties/preview", {
     method: "POST",
     headers: {
       "Content-Type":
@@ -5914,6 +6015,7 @@ const pollPipelineStatus = async (statusUrl, jobContext = {}) => {
     jobContext.lastStage = stage;
     jobContext.lastMessage = message;
     await setLoadingState(percent, stage, message);
+    renderPipelineProgress(progress);
 
     if (response.ok) {
       consecutiveFailures = 0;
@@ -5986,6 +6088,10 @@ const pollPipelineStatus = async (statusUrl, jobContext = {}) => {
     if (status === "error") {
       clearActivePipelineJob();
       throw new Error(payload.error ?? message ?? "The pipeline could not process the uploaded file.");
+    }
+    if (status === "cancelled") {
+      clearActivePipelineJob();
+      throw new Error(progress.message ?? "The pipeline execution was cancelled.");
     }
   }
 };
@@ -6507,28 +6613,34 @@ const runPredictionProfileInteractionWithLoading = async (action) => {
   if (typeof action !== "function") {
     return;
   }
-  if (predictionProfileInteractionInProgress) {
-    return;
-  }
   if (!(activeDataViewTab === "prediction" && isCategoricalPredictionColorMode())) {
     await Promise.resolve(action());
     return;
   }
+  // Apply every click, including clicks received while an overlay is loading.
+  const interactionAlreadyRunning = predictionProfileInteractionInProgress;
   predictionProfileInteractionInProgress = true;
+  if (interactionAlreadyRunning) {
+    await Promise.resolve(action());
+    return;
+  }
   try {
     await Promise.resolve(action());
-    const checkedLabels = getCheckedPredictionProfileLabels();
-    if (isManualGridPredictionResult() && predictionProfileSelectionTouched && checkedLabels.size > 0) {
+    while (isManualGridPredictionResult() && !hasManualGridCompetitionFeatures()) {
+      const checkedLabels = getCheckedPredictionProfileLabels();
+      if (!predictionProfileSelectionTouched || checkedLabels.size === 0) {
+        break;
+      }
       const selectionKey = buildManualGridOverlaySelectionKey(checkedLabels);
       activeManualGridServerOverlayKey = selectionKey;
       await ensureManualGridProfileOverlayForLabels(checkedLabels);
-      renderManualGridOverlay(currentTransform);
-    } else {
-      activeManualGridServerOverlayKey = "";
-      renderManualGridOverlay(currentTransform);
+      if (selectionKey === buildManualGridOverlaySelectionKey(getCheckedPredictionProfileLabels())) {
+        break;
+      }
     }
   } finally {
     predictionProfileInteractionInProgress = false;
+    renderManualGridOverlay(currentTransform);
   }
 };
 
@@ -8131,6 +8243,8 @@ const getManualGridPredictedQuartileColor = (predictedValue, predictedStats) => 
   return "#245c9f";
 };
 
+const manualGridGradientColorScales = new WeakMap();
+
 const getManualGridPredictedGradientColor = (predictedValue, predictedStats) => {
   if (!Number.isFinite(predictedValue) || !predictedStats) {
     return "rgba(24, 69, 111, 0.18)";
@@ -8138,7 +8252,9 @@ const getManualGridPredictedGradientColor = (predictedValue, predictedStats) => 
   if (predictedStats.max === predictedStats.min) {
     return "#245c9f";
   }
-  const colorScale = d3
+  let colorScale = manualGridGradientColorScales.get(predictedStats);
+  if (!colorScale) {
+    colorScale = d3
     .scaleLinear()
     .domain([
       predictedStats.min,
@@ -8149,7 +8265,9 @@ const getManualGridPredictedGradientColor = (predictedValue, predictedStats) => 
     ])
     .range(["#8f1d1d", "#d46a6a", "#d46a6a", "#8eb8e5", "#245c9f"])
     .interpolate(d3.interpolateLab)
-    .clamp(true);
+      .clamp(true);
+    manualGridGradientColorScales.set(predictedStats, colorScale);
+  }
   return colorScale(predictedValue);
 };
 
@@ -8322,7 +8440,7 @@ const getManualGridClientInterpolationSubdivisions = (gridCells, backendInterpol
     return 0;
   }
   const gridCellCount = Array.isArray(gridCells) ? gridCells.length : 0;
-  if (gridCellCount <= 0) {
+  if (gridCellCount <= 0 || gridCellCount > 512) {
     return 0;
   }
   const adaptiveSubdivisions = Math.floor(
@@ -8338,11 +8456,15 @@ const getManualGridOverlayComputationState = (gridCells) => {
   const predictionGeojson = datasetStore.prediction?.geojson ?? null;
   const predictionRawGeojson = datasetStore.prediction?.rawGeojson ?? null;
   const predictionSummary = datasetStore.prediction?.summary ?? null;
+  const categoricalMode = isCategoricalPredictionColorMode();
+  const selectedIdHeader = getPredictionSelectedIdHeader();
   if (
     manualGridOverlayComputationCache &&
     manualGridOverlayComputationCache.predictionGeojson === predictionGeojson &&
     manualGridOverlayComputationCache.predictionRawGeojson === predictionRawGeojson &&
     manualGridOverlayComputationCache.predictionSummary === predictionSummary &&
+    manualGridOverlayComputationCache.categoricalMode === categoricalMode &&
+    manualGridOverlayComputationCache.selectedIdHeader === selectedIdHeader &&
     manualGridOverlayComputationCache.gridCells === gridCells
   ) {
     return manualGridOverlayComputationCache;
@@ -8401,10 +8523,11 @@ const getManualGridOverlayComputationState = (gridCells) => {
   const backendInterpolatedSamples = Array.isArray(backendInterpolatedSurface?.samples)
     ? backendInterpolatedSurface.samples.filter((sample) => Number.isFinite(asFloat(sample?.predictedValue)))
     : [];
-  const interpolationSubdivisions = getManualGridClientInterpolationSubdivisions(
-    normalizedGridCells,
-    backendInterpolatedSamples,
-  );
+  const needsClientInterpolation = !isCategoricalPredictionColorMode()
+    && getPredictionDistinctGermplasmNames().length <= 1;
+  const interpolationSubdivisions = needsClientInterpolation
+    ? getManualGridClientInterpolationSubdivisions(normalizedGridCells, backendInterpolatedSamples)
+    : 0;
   const directHeatSamples = backendOverlayBase?.mode === "numeric" && Array.isArray(backendOverlayBase.heat_samples)
     ? backendOverlayBase.heat_samples.filter((sample) => Number.isFinite(asFloat(sample?.predictedValue)))
     : buildManualGridDirectHeatSamples(normalizedGridCells, predictedLookup);
@@ -8420,6 +8543,8 @@ const getManualGridOverlayComputationState = (gridCells) => {
     predictionGeojson,
     predictionRawGeojson,
     predictionSummary,
+    categoricalMode,
+    selectedIdHeader,
     gridCells,
     normalizedGridCells,
     featureEntries,
@@ -8465,6 +8590,25 @@ const isHeavyFarmManualGridPrediction = () => {
   return featureCount <= 0 || gridCellCount <= 0 ? true : featureCount > gridCellCount;
 };
 
+const hasManualGridCompetitionFeatures = () =>
+  Array.isArray(datasetStore.prediction?.rawGeojson?.features) &&
+  datasetStore.prediction.rawGeojson.features.length > 0;
+
+const syncManualGridSelectedFeature = (featureLookup) => {
+  const gridCellId = String(selectedFeature?.properties?.["Forecast grid cell id"] ?? "").trim();
+  if (!gridCellId) {
+    return;
+  }
+  const nextFeature = featureLookup.get(gridCellId) ?? null;
+  if (nextFeature === selectedFeature) {
+    return;
+  }
+  selectedFeature = nextFeature;
+  currentPage = 0;
+  hideTooltip();
+  renderDetails();
+};
+
 const renderManualGridOverlay = (transform) => {
   if (!mapContext?.manualGridHeatLayer || !mapContext?.manualGridCellsLayer || !mapContext?.manualGridMarkersLayer) {
     return;
@@ -8503,7 +8647,7 @@ const renderManualGridOverlay = (transform) => {
       : activeProfileLabel
         ? `active:${normalizePredictionCategoryLabel(activeProfileLabel)}`
         : "all";
-    if (useCheckedLabels) {
+    if (useCheckedLabels && !hasManualGridCompetitionFeatures()) {
       const serverOverlayKey = buildManualGridOverlaySelectionKey(checkedLabels);
       const serverOverlayPayload = serverOverlayKey
         ? manualGridServerOverlayCache.get(serverOverlayKey) ?? null
@@ -8551,6 +8695,7 @@ const renderManualGridOverlay = (transform) => {
     if (profileHeatSamples === null) {
       profileHeatSamples = overlayState.profileHeatSampleLookups.get(lookupKey) ?? [];
     }
+    syncManualGridSelectedFeature(featureLookup);
   }
   const hasMultiProfileValues = multiProfileMode
     ? (
@@ -8574,23 +8719,30 @@ const renderManualGridOverlay = (transform) => {
   const useGroupedCategoricalHeatPaths =
     multiProfileMode &&
     hasPredictionValues;
-  const groupedHeatSamples = useGroupedCategoricalHeatPaths
+  const useGroupedNumericHeatPaths = !multiProfileMode && hasPredictionValues;
+  const useGroupedHeatPaths = useGroupedCategoricalHeatPaths || useGroupedNumericHeatPaths;
+  const groupedHeatSamples = useGroupedHeatPaths
     ? buildManualGridGroupedHeatSamples(
         heatSamples,
         transform,
-        hasPredictionValues ? MANUAL_GRID_CATEGORICAL_SAMPLE_PADDING_PX : 0,
-        (sample) => normalizePredictionCategoryLabel(sample?.profileLabel) || "__unclassified__",
+        multiProfileMode ? MANUAL_GRID_CATEGORICAL_SAMPLE_PADDING_PX : MANUAL_GRID_QUARTILE_SAMPLE_PADDING_PX,
+        (sample) => multiProfileMode
+          ? normalizePredictionCategoryLabel(sample?.profileLabel) || "__unclassified__"
+          : toMarkerColorAlpha(
+              getManualGridPredictedGradientColor(sample.predictedValue, predictedStats),
+              useSmoothedNumericGrid ? 0.5 : 0.42,
+            ),
       )
     : [];
 
   mapContext.manualGridHeatLayer
     .selectAll("path")
-    .data(useGroupedCategoricalHeatPaths ? groupedHeatSamples : heatSamples, (sample) => sample.id)
+    .data(useGroupedHeatPaths ? groupedHeatSamples : heatSamples, (sample) => sample.id)
     .join("path")
     .attr(
       "d",
       (sample) => (
-        useGroupedCategoricalHeatPaths
+        useGroupedHeatPaths
           ? sample.path
           : buildManualGridScreenRectPath(
               sample,
@@ -8608,6 +8760,9 @@ const renderManualGridOverlay = (transform) => {
           getPredictionProfileColor(profileLabel),
           lightweightFarmComparisonMode ? 0.34 : 0.42,
         );
+      }
+      if (useGroupedNumericHeatPaths) {
+        return sample.groupKey;
       }
       return toMarkerColorAlpha(
         getManualGridPredictedGradientColor(sample.predictedValue, predictedStats),
@@ -9125,8 +9280,7 @@ const applyFeatureCollection = async (
   }
   markerGroups.classed("active", (datum) => datum === selectedFeature);
   if (isCategoricalPredictionColorMode()) {
-    const dominantLabel = getDominantPredictionProfileLabel();
-    setCheckedPredictionProfileLabels(dominantLabel ? [dominantLabel] : []);
+    setCheckedPredictionProfileLabels(getAvailablePredictionProfileSummaries().map(profile => profile.label));
     predictionProfileSelectionTouched = false;
     setActivePredictionProfileHighlight("");
   } else {
@@ -9518,7 +9672,7 @@ const handleContinueAfterPreprocess = async () => {
     await sleepFrame();
     await triggerBrowserDownload(resolvePredictionOutputDownloadUrl(payload), {
       promptForFilename: false,
-      suggestedFilename: `${String(payload?.source_name ?? "high_potential_sites").replace(/\.[^./]+$/, "") || "high_potential_sites"}.xlsx`,
+      suggestedFilename: `${String(payload?.source_name ?? "high_potential_sites").replace(/\.[^./]+$/, "") || "high_potential_sites"}${getPredictionOutputExtension(payload)}`,
       bypassDownloadGate: true,
     });
     scheduleLoadingPanelReset();
@@ -9676,7 +9830,7 @@ const handleExecuteSelectedGermplasm = async () => {
     await sleepFrame();
     await triggerBrowserDownload(resolvePredictionOutputDownloadUrl(payload), {
       promptForFilename: false,
-      suggestedFilename: `${String(payload?.source_name ?? "high_potential_sites").replace(/\.[^./]+$/, "") || "high_potential_sites"}.xlsx`,
+      suggestedFilename: `${String(payload?.source_name ?? "high_potential_sites").replace(/\.[^./]+$/, "") || "high_potential_sites"}${getPredictionOutputExtension(payload)}`,
       bypassDownloadGate: true,
     });
     scheduleLoadingPanelReset();

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+from tabular_io import IDENTIFIER_COLUMN
+from pipeline.progress import work_progress, write_dataframe_excel, write_dataframe_csv
 
 from pipeline.common import dataframe_to_geojson
 from pipeline.model.grain_yield_model import run_grain_yield_prediction
@@ -39,9 +41,15 @@ def combine_geo_and_prediction_dataframes(geo_df, prediction_df):
     return geo_ready.join(prediction_ready)
 
 
-def coerce_numeric_like_columns(df: pd.DataFrame) -> pd.DataFrame:
+def coerce_numeric_like_columns(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
     normalized = df.copy()
-    for column in normalized.columns:
+    if progress_callback:
+        progress_callback(0, len(normalized.columns))
+    for completed, column in enumerate(normalized.columns, 1):
+        if progress_callback:
+            progress_callback(completed - 1, len(normalized.columns))
+        if IDENTIFIER_COLUMN.search(str(column)):
+            continue
         series = normalized[column]
         if not pd.api.types.is_object_dtype(series) and not pd.api.types.is_string_dtype(series):
             continue
@@ -51,23 +59,26 @@ def coerce_numeric_like_columns(df: pd.DataFrame) -> pd.DataFrame:
         parsed = pd.to_numeric(series.where(non_empty_mask), errors="coerce")
         if parsed[non_empty_mask].notna().all():
             normalized[column] = parsed
+    if progress_callback:
+        progress_callback(len(normalized.columns), len(normalized.columns), True)
     return normalized
 
 
-def normalize_prediction_output_values(df: pd.DataFrame) -> pd.DataFrame:
-    normalized = coerce_numeric_like_columns(df)
+def normalize_prediction_output_values(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
+    normalized = coerce_numeric_like_columns(df, progress_callback)
     if PREDICTED_COLUMN in normalized.columns:
         predicted_series = pd.to_numeric(normalized[PREDICTED_COLUMN], errors="coerce")
         normalized[PREDICTED_COLUMN] = predicted_series.round(6).where(predicted_series.notna(), normalized[PREDICTED_COLUMN])
     return normalized
 
 
-def write_combined_prediction_outputs(prediction_with_geo, model_dir: Path) -> tuple[Path, Path]:
+def write_combined_prediction_outputs(prediction_with_geo, model_dir: Path, progress_callback=None, csv_only=False) -> tuple[Path, Path]:
     combined_csv = model_dir / "prediction_with_context.csv"
-    combined_xlsx = model_dir / "prediction_with_context.xlsx"
-    normalized_prediction = normalize_prediction_output_values(prediction_with_geo)
-    normalized_prediction.to_csv(combined_csv, index=False)
-    normalized_prediction.to_excel(combined_xlsx, index=False)
+    combined_xlsx = combined_csv if csv_only else model_dir / "prediction_with_context.xlsx"
+    normalized_prediction = normalize_prediction_output_values(prediction_with_geo, work_progress(progress_callback, 98, "Normalizing prediction export fields", phase="phase05", unit="columns") if progress_callback else None)
+    write_dataframe_csv(normalized_prediction, combined_csv, work_progress(progress_callback, 98, "Saving prediction context CSV", phase="phase05") if progress_callback else None)
+    if not csv_only:
+        write_dataframe_excel(normalized_prediction, combined_xlsx, work_progress(progress_callback, 98, "Saving prediction context workbook", phase="phase05", unit="cells") if progress_callback else None)
     return combined_csv, combined_xlsx
 
 

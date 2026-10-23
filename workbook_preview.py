@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tabular_io import read_records
 from functools import lru_cache
 from pathlib import Path
 import re
@@ -89,6 +90,8 @@ def _extract_cell_value(cell: ET.Element, shared_strings: list[str]) -> str:
 
 def _read_sheet_headers_and_rows(workbook_path: Path) -> tuple[list[str], list[dict[str, str]]]:
     workbook_path = Path(workbook_path)
+    if workbook_path.suffix.lower() == ".csv":
+        return read_records(workbook_path)
     with ZipFile(workbook_path) as workbook_archive:
         shared_strings = _read_shared_strings(workbook_archive)
         sheet_path = _resolve_first_sheet_path(workbook_archive)

@@ -488,9 +488,25 @@ def terminate_existing_pipeline_processes() -> int:
             continue
         if pid <= 0 or pid == current_pid or pid in known_job_pids:
             continue
-        if pipeline_script not in command:
+        try:
+            proc_args = Path(f"/proc/{pid}/cmdline")
+            if proc_args.exists():
+                arguments = [arg.decode("utf-8", errors="replace") for arg in proc_args.read_bytes().split(b"\0") if arg]
+            else:
+                import shlex
+                arguments = shlex.split(command)
+        except (OSError, ValueError):
+            continue
+        if not arguments or not Path(arguments[0]).name.lower().startswith("python") or pipeline_script not in arguments:
             continue
         if terminate_pid(pid):
+            if "--run-dir" in arguments:
+                try:
+                    run_dir = Path(arguments[arguments.index("--run-dir") + 1]).resolve()
+                    if run_dir.parent == PIPELINE_RUNS_DIR.resolve():
+                        _write_pipeline_progress_status(run_dir, status="cancelled", message="The pipeline job was cancelled.")
+                except (IndexError, OSError):
+                    pass
             cancelled_total += 1
     return cancelled_total
 
@@ -1273,7 +1289,12 @@ def _build_manual_grid_categorical_label(
 ) -> str:
     name = str(properties.get("Name") or "").strip()
     normalized_selected_id_header = str(selected_id_header or "").strip()
-    selected_id_value = str(properties.get(normalized_selected_id_header) or "").strip() if normalized_selected_id_header else ""
+    raw_selected_id_value = properties.get(normalized_selected_id_header) if normalized_selected_id_header else None
+    selected_id_value = "" if raw_selected_id_value is None else str(raw_selected_id_value).strip()
+    # Zero is a valid category. Match the frontend's integer display labels,
+    # including identifiers read from Excel as floating-point numbers.
+    if re.fullmatch(r"-?\d+(?:\.0+)?", selected_id_value):
+        selected_id_value = str(int(selected_id_value.split(".", 1)[0]))
     if normalized_selected_id_header and name and selected_id_value:
         return f"{name} - {selected_id_value}"
     if multi_germplasm_mode and name:
@@ -1529,14 +1550,28 @@ def _build_simple_xlsx_bytes(headers: list[str], rows: list[list[object]]) -> by
     return output.getvalue()
 
 
-def _build_manual_grid_prediction_workbook_bytes(summary: dict[str, object]) -> tuple[bytes, str] | None:
+def _build_manual_grid_prediction_workbook_bytes(
+    summary: dict[str, object], selected_labels: list[str] | None = None,
+) -> tuple[bytes, str] | None:
     if str(summary.get("climate_scope", "")).strip() != "regional_manual":
         return None
     geojson = resolve_prediction_feature_collection(summary)
-    compact_geojson, _ = _build_manual_grid_prediction_payload(summary, geojson)
+    compact_geojson, distinct_names = _build_manual_grid_prediction_payload(summary, geojson)
     source_features = compact_geojson.get("features", []) if isinstance(compact_geojson, dict) else []
     if not isinstance(source_features, list) or not source_features:
         return None
+
+    selected_lookup = {_normalize_prediction_selection_label(label) for label in (selected_labels or [])}
+    if selected_lookup:
+        source_features = [
+            feature for feature in source_features
+            if _normalize_prediction_selection_label(_build_manual_grid_categorical_label(
+                feature.get("properties", {}),
+                selected_id_header=str(summary.get("selected_id_header") or "").strip(),
+                multi_profile_mode=bool(summary.get("multi_profile_mode")),
+                multi_germplasm_mode=len(distinct_names) > 1,
+            )) in selected_lookup
+        ]
 
     winners_by_cell: dict[str, dict[str, object]] = {}
     for feature in source_features:
@@ -1577,10 +1612,15 @@ def _build_manual_grid_prediction_workbook_bytes(summary: dict[str, object]) -> 
             row.append(properties.get(key, ""))
         rows.append(row)
 
-    workbook_bytes = _build_simple_xlsx_bytes(headers, rows)
     source_name = Path(str(summary.get("source_name", "") or "prediction_output").strip() or "prediction_output").stem
-    file_name = f"{source_name}_prediction_cells.xlsx"
-    return workbook_bytes, file_name
+    if summary.get("tabular_format") == "csv":
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        writer.writerows(rows)
+        return buffer.getvalue().encode("utf-8"), f"{source_name}_prediction_cells.csv"
+    workbook_bytes = _build_simple_xlsx_bytes(headers, rows)
+    return workbook_bytes, f"{source_name}_prediction_cells.xlsx"
 
 
 def _build_manual_grid_special_surface(
@@ -2428,12 +2468,25 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def read_text_header(self, name: str, default: str = "") -> str:
+        value = self.headers.get(name, default)
+        if self.headers.get("X-Upload-Header-Encoding", "") != "uri-component-v1":
+            return value
+        from urllib.parse import unquote
+        try:
+            decoded = unquote(value, encoding="utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"Invalid UTF-8 encoding in upload header {name}.") from error
+        if any(character in decoded for character in ("\r", "\n", "\0")):
+            raise ValueError(f"Invalid control character in upload header {name}.")
+        return decoded
+
     def read_upload_request(self) -> tuple[str, bytes]:
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
             raise ValueError("The request body is empty.")
 
-        source_name = self.headers.get("X-File-Name", "uploaded.xlsx").strip() or "uploaded.xlsx"
+        source_name = self.read_text_header("X-File-Name", "uploaded.xlsx").strip() or "uploaded.xlsx"
         if not source_name.lower().endswith(".xlsx"):
             raise ValueError("Only .xlsx files are supported.")
         return source_name, self.rfile.read(content_length)
@@ -2451,7 +2504,7 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         return payload
 
     def parse_selected_germplasm_names_header(self) -> list[str]:
-        raw_value = self.headers.get("X-Selected-Germplasm-Names", "").strip()
+        raw_value = self.read_text_header("X-Selected-Germplasm-Names", "").strip()
         if not raw_value:
             return []
         parsed = json.loads(raw_value)
@@ -2461,7 +2514,7 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         return names
 
     def parse_json_list_header(self, header_name: str) -> list[str]:
-        raw_value = self.headers.get(header_name, "").strip()
+        raw_value = self.read_text_header(header_name, "").strip()
         if not raw_value:
             return []
         parsed = json.loads(raw_value)
@@ -2471,11 +2524,11 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
 
     def parse_selected_germplasm_selection_mode_header(self) -> str:
-        value = self.headers.get("X-Selected-Germplasm-Selection-Mode", "").strip() or "all_matches"
+        value = self.read_text_header("X-Selected-Germplasm-Selection-Mode", "").strip() or "all_matches"
         return "first_match_only" if value == "first_match_only" else "all_matches"
 
     def parse_use_source_row_dates_header(self) -> bool:
-        value = self.headers.get("X-Use-Source-Row-Dates", "").strip().lower()
+        value = self.read_text_header("X-Use-Source-Row-Dates", "").strip().lower()
         if value in {"0", "false", "no"}:
             return False
         return True
@@ -2677,26 +2730,26 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_start_process_xlsx(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        selected_model_id = self.headers.get("X-Selected-Model-Id", "").strip()
+        selected_model_id = self.read_text_header("X-Selected-Model-Id", "").strip()
         selected_germplasm_names = self.parse_selected_germplasm_names_header()
         selected_germplasm_row_ids = self.parse_json_list_header("X-Selected-Germplasm-Row-Ids")
-        selected_germplasm_projection_mode = self.headers.get(
+        selected_germplasm_projection_mode = self.read_text_header(
             "X-Selected-Germplasm-Projection-Mode", ""
         ).strip()
         selected_germplasm_selection_mode = self.parse_selected_germplasm_selection_mode_header()
-        projection_template_workbook = self.headers.get("X-Projection-Template-Workbook", "").strip()
-        forecast_planting_date = self.headers.get("X-Forecast-Planting-Date", "").strip()
-        forecast_harvesting_date = self.headers.get("X-Forecast-Harvesting-Date", "").strip()
-        pause_after_preprocess = self.headers.get("X-Pause-After-Preprocess", "").strip() == "1"
-        climate_scope = self.headers.get("X-Climate-Scope", "point").strip() or "point"
-        regional_country = self.headers.get("X-Regional-Country", "").strip()
-        regional_bounds_label = self.headers.get("X-Regional-Bounds-Label", "").strip()
-        regional_bounds_latitude_min = self.headers.get("X-Regional-Bounds-Latitude-Min", "").strip()
-        regional_bounds_latitude_max = self.headers.get("X-Regional-Bounds-Latitude-Max", "").strip()
-        regional_bounds_longitude_min = self.headers.get("X-Regional-Bounds-Longitude-Min", "").strip()
-        regional_bounds_longitude_max = self.headers.get("X-Regional-Bounds-Longitude-Max", "").strip()
-        nasa_grid_resolution_km = self.headers.get("X-Nasa-Grid-Resolution-Km", "").strip()
-        selected_id_header = self.headers.get("X-Selected-Id-Header", "").strip()
+        projection_template_workbook = self.read_text_header("X-Projection-Template-Workbook", "").strip()
+        forecast_planting_date = self.read_text_header("X-Forecast-Planting-Date", "").strip()
+        forecast_harvesting_date = self.read_text_header("X-Forecast-Harvesting-Date", "").strip()
+        pause_after_preprocess = self.read_text_header("X-Pause-After-Preprocess", "").strip() == "1"
+        climate_scope = self.read_text_header("X-Climate-Scope", "point").strip() or "point"
+        regional_country = self.read_text_header("X-Regional-Country", "").strip()
+        regional_bounds_label = self.read_text_header("X-Regional-Bounds-Label", "").strip()
+        regional_bounds_latitude_min = self.read_text_header("X-Regional-Bounds-Latitude-Min", "").strip()
+        regional_bounds_latitude_max = self.read_text_header("X-Regional-Bounds-Latitude-Max", "").strip()
+        regional_bounds_longitude_min = self.read_text_header("X-Regional-Bounds-Longitude-Min", "").strip()
+        regional_bounds_longitude_max = self.read_text_header("X-Regional-Bounds-Longitude-Max", "").strip()
+        nasa_grid_resolution_km = self.read_text_header("X-Nasa-Grid-Resolution-Km", "").strip()
+        selected_id_header = self.read_text_header("X-Selected-Id-Header", "").strip()
         use_source_row_dates = self.parse_use_source_row_dates_header()
         run_id, run_dir = self.create_pipeline_job(
             source_name,
@@ -2850,32 +2903,9 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         )
 
     def handle_cancel_all_processes(self) -> None:
-        cancelled_pipeline_jobs = 0
-        reap_finished_pipeline_jobs(remove_expired=False)
-        with PIPELINE_JOBS_LOCK:
-            jobs = list(PIPELINE_JOBS.items())
-        for job_id, job in jobs:
-            process = job.get("process")
-            if process is None:
-                continue
-            try:
-                if process.poll() is None:
-                    process.terminate()
-                    run_dir = Path(job.get("run_dir", "")) if str(job.get("run_dir", "")).strip() else None
-                    if run_dir is not None:
-                        _write_pipeline_progress_status(
-                            run_dir,
-                            status="cancelled",
-                            message="The pipeline job was cancelled before completion.",
-                        )
-                    with PIPELINE_JOBS_LOCK:
-                        active_job = PIPELINE_JOBS.get(job_id)
-                        if active_job is not None:
-                            active_job["final_status"] = "cancelled"
-                            active_job["finished_at"] = time.time()
-                    cancelled_pipeline_jobs += 1
-            except Exception:
-                continue
+        # Include pipelines recovered after restarting the server, whose Popen
+        # objects are no longer in this server's in-memory registry.
+        cancelled_pipeline_jobs = terminate_existing_pipeline_processes()
         cancelled_featurehero_jobs = 0
         featurehero_jobs = get_active_featurehero_jobs()
         active_featurehero_jobs: dict[str, object] = {}
@@ -3105,11 +3135,16 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             source_name = str(job_info["source_name"])
             with PIPELINE_JOBS_LOCK:
                 job = PIPELINE_JOBS.get(job_id)
+            if progress_payload.get("status") == "cancelled":
+                self.send_json({"job_id": job_id, "status": "cancelled", "progress": progress_payload})
+                return
             if return_code is None:
                 running_payload: dict[str, object] = {
                     "job_id": job_id,
-                    "status": progress_payload.get("status", "running"),
-                    "progress": progress_payload,
+                    # Completion is published only after the process exits and
+                    # build_completed_payload supplies the map artifacts.
+                    "status": "running",
+                    "progress": {**progress_payload, "status": "running"},
                 }
                 if should_skip_running_preprocess_geojson(job):
                     self.send_json(running_payload)
@@ -3207,29 +3242,34 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
                 cache=PIPELINE_PROGRESS_CACHE,
             ) if progress_file and progress_file.exists() else {}
             print(f"[status] Falling back to cached pipeline status for {job_id}: {exc!r}", file=sys.stderr, flush=True)
+            recovered_status = progress_payload.get("status", "running")
+            if recovered_status == "completed":
+                # A cached completion marker has no result payload. Keep the
+                # client polling until the artifacts can be read successfully.
+                recovered_status = "running"
             self.send_json(
                 {
                     "job_id": job_id,
-                    "status": progress_payload.get("status", "running"),
-                    "progress": progress_payload,
+                    "status": recovered_status,
+                    "progress": {**progress_payload, "status": recovered_status},
                     "warning": "Status payload was recovered after a transient local pipeline read error.",
                 }
             )
 
     def handle_process_xlsx(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        selected_model_id = self.headers.get("X-Selected-Model-Id", "").strip()
+        selected_model_id = self.read_text_header("X-Selected-Model-Id", "").strip()
         selected_germplasm_names = self.parse_selected_germplasm_names_header()
-        forecast_planting_date = self.headers.get("X-Forecast-Planting-Date", "").strip()
-        forecast_harvesting_date = self.headers.get("X-Forecast-Harvesting-Date", "").strip()
-        pause_after_preprocess = self.headers.get("X-Pause-After-Preprocess", "").strip() == "1"
-        climate_scope = self.headers.get("X-Climate-Scope", "point").strip() or "point"
-        regional_country = self.headers.get("X-Regional-Country", "").strip()
-        regional_bounds_label = self.headers.get("X-Regional-Bounds-Label", "").strip()
-        regional_bounds_latitude_min = self.headers.get("X-Regional-Bounds-Latitude-Min", "").strip()
-        regional_bounds_latitude_max = self.headers.get("X-Regional-Bounds-Latitude-Max", "").strip()
-        regional_bounds_longitude_min = self.headers.get("X-Regional-Bounds-Longitude-Min", "").strip()
-        regional_bounds_longitude_max = self.headers.get("X-Regional-Bounds-Longitude-Max", "").strip()
+        forecast_planting_date = self.read_text_header("X-Forecast-Planting-Date", "").strip()
+        forecast_harvesting_date = self.read_text_header("X-Forecast-Harvesting-Date", "").strip()
+        pause_after_preprocess = self.read_text_header("X-Pause-After-Preprocess", "").strip() == "1"
+        climate_scope = self.read_text_header("X-Climate-Scope", "point").strip() or "point"
+        regional_country = self.read_text_header("X-Regional-Country", "").strip()
+        regional_bounds_label = self.read_text_header("X-Regional-Bounds-Label", "").strip()
+        regional_bounds_latitude_min = self.read_text_header("X-Regional-Bounds-Latitude-Min", "").strip()
+        regional_bounds_latitude_max = self.read_text_header("X-Regional-Bounds-Latitude-Max", "").strip()
+        regional_bounds_longitude_min = self.read_text_header("X-Regional-Bounds-Longitude-Min", "").strip()
+        regional_bounds_longitude_max = self.read_text_header("X-Regional-Bounds-Longitude-Max", "").strip()
         run_id, run_dir = self.create_pipeline_job(
             source_name,
             file_bytes,
@@ -3296,11 +3336,12 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
                 summary_path,
                 cache=PIPELINE_SUMMARY_CACHE,
             )
-            cell_level_workbook = _build_manual_grid_prediction_workbook_bytes(summary)
+            selected_labels = parse_qs(query or "").get("labels", [])
+            cell_level_workbook = _build_manual_grid_prediction_workbook_bytes(summary, selected_labels)
             if cell_level_workbook is not None:
                 workbook_bytes, filename = cell_level_workbook
                 self.send_response(200)
-                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Type", "text/csv; charset=utf-8" if filename.lower().endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 self.send_header(
                     "Content-Disposition",
                     f'attachment; filename="{filename}"',
@@ -3640,10 +3681,10 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_germplasm_options(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        selected_model_id = self.headers.get("X-Selected-Model-Id", "").strip()
-        climate_scope = self.headers.get("X-Climate-Scope", "regional_manual").strip() or "regional_manual"
-        selected_id_header = self.headers.get("X-Selected-Id-Header", "").strip()
-        prediction_mode = self.headers.get("X-Prediction-Germplasm-Mode", "").strip().lower()
+        selected_model_id = self.read_text_header("X-Selected-Model-Id", "").strip()
+        climate_scope = self.read_text_header("X-Climate-Scope", "regional_manual").strip() or "regional_manual"
+        selected_id_header = self.read_text_header("X-Selected-Id-Header", "").strip()
+        prediction_mode = self.read_text_header("X-Prediction-Germplasm-Mode", "").strip().lower()
         PIPELINE_RUNS_DIR.mkdir(parents=True, exist_ok=True)
         preview_dir = PIPELINE_RUNS_DIR / f"preview-{uuid.uuid4().hex[:8]}"
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -3711,9 +3752,9 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_selecction_properties_preview(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        target_column = self.headers.get("X-Target-Column", "").strip()
-        latitude_column = self.headers.get("X-Latitude-Column", "").strip()
-        longitude_column = self.headers.get("X-Longitude-Column", "").strip()
+        target_column = self.read_text_header("X-Target-Column", "").strip()
+        latitude_column = self.read_text_header("X-Latitude-Column", "").strip()
+        longitude_column = self.read_text_header("X-Longitude-Column", "").strip()
         if not target_column:
             raise ValueError("Select a target variable before previewing the workbook.")
         if not latitude_column or not longitude_column:
@@ -3754,18 +3795,18 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_selecction_properties_summary(self) -> None:
         source_name, file_bytes = self.read_upload_request()
-        target_column = self.headers.get("X-Target-Column", "").strip()
-        latitude_column = self.headers.get("X-Latitude-Column", "").strip()
-        longitude_column = self.headers.get("X-Longitude-Column", "").strip()
-        planting_date_column = self.headers.get("X-Planting-Date-Column", "").strip()
-        harvesting_date_column = self.headers.get("X-Harvesting-Date-Column", "").strip()
-        soil_texture_column = self.headers.get("X-Soil-Texture-Column", "").strip()
-        soil_depth_column = self.headers.get("X-Soil-Depth-Column", "").strip()
+        target_column = self.read_text_header("X-Target-Column", "").strip()
+        latitude_column = self.read_text_header("X-Latitude-Column", "").strip()
+        longitude_column = self.read_text_header("X-Longitude-Column", "").strip()
+        planting_date_column = self.read_text_header("X-Planting-Date-Column", "").strip()
+        harvesting_date_column = self.read_text_header("X-Harvesting-Date-Column", "").strip()
+        soil_texture_column = self.read_text_header("X-Soil-Texture-Column", "").strip()
+        soil_depth_column = self.read_text_header("X-Soil-Depth-Column", "").strip()
         identifier_columns = self.parse_json_list_header("X-Identifier-Columns")
         categorical_columns = self.parse_json_list_header("X-Categorical-Columns")
         quantitative_columns = self.parse_json_list_header("X-Quantitative-Columns")
         no_defined_columns = self.parse_json_list_header("X-No-Defined-Columns")
-        workspace_name = self.headers.get("X-Workspace-Name", "").strip()
+        workspace_name = self.read_text_header("X-Workspace-Name", "").strip()
         if not all([target_column, latitude_column, longitude_column, planting_date_column, harvesting_date_column, soil_texture_column, soil_depth_column]):
             raise ValueError("Complete Initial Settings before executing Summary.")
         if not identifier_columns:

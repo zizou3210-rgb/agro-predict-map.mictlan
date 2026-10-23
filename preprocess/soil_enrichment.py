@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from collections import deque
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from config_env import resolve_shared_cache_dir
 from shared_cache import (
     get_soil_cache_entry,
+    get_soil_cache_entries,
+    upsert_soil_cache_entries,
     load_soil_cache_payload as load_shared_soil_cache_payload,
     write_soil_cache_payload as write_shared_soil_cache_payload,
 )
@@ -39,6 +44,25 @@ TEXTURE_DEPTH_PREFERENCE = (
 )
 DEFAULT_TEXTURE_BUCKET = "Loam"
 DEFAULT_DEPTH_BUCKET = "100cm o mas"
+_SOILGRIDS_REQUEST_TIMES = deque()
+_SOILGRIDS_REQUEST_LOCK = Lock()
+
+
+def _wait_for_soilgrids_slot(endpoint: str) -> None:
+    """Respect ISRIC's five requests per minute within this pipeline process."""
+    if urlparse(endpoint).hostname != "rest.isric.org":
+        return
+    while True:
+        with _SOILGRIDS_REQUEST_LOCK:
+            now = time.monotonic()
+            while _SOILGRIDS_REQUEST_TIMES and now - _SOILGRIDS_REQUEST_TIMES[0] >= 60:
+                _SOILGRIDS_REQUEST_TIMES.popleft()
+            if len(_SOILGRIDS_REQUEST_TIMES) < 5:
+                _SOILGRIDS_REQUEST_TIMES.append(now)
+                return
+            delay = max(0.01, 60 - (now - _SOILGRIDS_REQUEST_TIMES[0]))
+        # No cache or request lock is held while waiting for a quota slot.
+        time.sleep(delay)
 
 
 def is_blank(value: object) -> bool:
@@ -224,6 +248,7 @@ def _fetch_soilgrids_payload(latitude: float, longitude: float) -> dict[str, Any
     )
     url = f"{DEFAULT_SOILGRIDS_ENDPOINT}?{query}"
     request = Request(url, headers=SOIL_REQUEST_HEADERS)
+    _wait_for_soilgrids_slot(DEFAULT_SOILGRIDS_ENDPOINT)
     with urlopen(request, timeout=SOIL_HTTP_TIMEOUT_SECONDS) as response:
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, dict):
@@ -272,12 +297,13 @@ def resolve_soil_record_from_payload(
     longitude: float,
     *,
     payload: dict[str, Any],
+    lookup_shared_cache: bool = True,
 ) -> tuple[dict[str, object], str, bool]:
     normalized_payload = normalize_cache_payload(payload)
     points = normalized_payload.setdefault("points", {})
     key = cache_key(latitude, longitude)
     cached = points.get(key)
-    if not isinstance(cached, dict):
+    if not isinstance(cached, dict) and lookup_shared_cache:
         cached = get_soil_cache_entry(key)
         if isinstance(cached, dict):
             points[key] = cached
