@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -26,32 +28,41 @@ def get_featurehero_repo() -> Path:
 
 
 def get_featurehero_python() -> Path:
-    override = os.environ.get("APP_FEATUREHERO_PYTHON", "").strip()
-    if override:
-        candidate = Path(override).expanduser()
-        if candidate.exists():
+    python_candidates = [
+        Path(value).expanduser()
+        for name in ("APP_FEATUREHERO_PYTHON", "APP_PIPELINE_PYTHON")
+        if (value := os.environ.get(name, "").strip())
+    ]
+    repo = APP_RESOURCES_DIR / "featurehero"
+    python_candidates.extend([
+        repo / ".venv" / "Scripts" / "python.exe",
+        repo / ".venv" / "Scripts" / "python3.exe",
+        repo / ".venv" / "bin" / "python",
+        repo / ".venv" / "bin" / "python3",
+        repo / ".venv" / "bin" / "python3.12",
+        Path(sys.executable),
+    ])
+    # The pipeline may already run in a compatible environment even when the
+    # vendored venv is absent or its system-interpreter symlink is broken.
+    for candidate in dict.fromkeys(python_candidates):
+        if not candidate.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                [str(candidate), "-c", "import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
             return candidate
-
-    repo_candidates = [APP_RESOURCES_DIR / "featurehero"]
-    python_candidates: list[Path] = []
-    for repo in repo_candidates:
-        python_candidates.extend(
-            [
-                repo / ".venv" / "Scripts" / "python.exe",
-                repo / ".venv" / "Scripts" / "python3.exe",
-                repo / ".venv" / "bin" / "python",
-                repo / ".venv" / "bin" / "python3",
-                repo / ".venv" / "bin" / "python3.12",
-            ]
-        )
-
-    python_path = _resolve_existing_path(python_candidates)
-    if python_path is None:
-        raise FileNotFoundError(
-            "FeatureHero Python interpreter was not found in "
-            "resources/featurehero/.venv."
-        )
-    return python_path
+    raise FileNotFoundError(
+        "No usable Python 3.12 interpreter was found for FeatureHero. "
+        "Configure APP_FEATUREHERO_PYTHON or APP_PIPELINE_PYTHON, "
+        "or install Python 3.12 in resources/featurehero/.venv."
+    )
 
 
 def get_phen_transform_dataset_repo() -> Path | None:
