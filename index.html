@@ -440,9 +440,13 @@
             <p class="launcher-kicker">Geo Information Summary</p>
           </div>
           <div class="summary-tabs">
+            <button class="summary-tab" id="summary-tab-statistics" type="button" hidden>Statistics</button>
             <button class="summary-tab active" id="summary-tab-countries" type="button">Countries</button>
             <button class="summary-tab" id="summary-tab-stats" type="button">Metrics</button>
             <button class="summary-tab" id="summary-tab-log" type="button">Log</button>
+          </div>
+          <div class="summary-tab-panel" id="summary-panel-statistics" hidden>
+            <div id="prediction-statistics"></div>
           </div>
           <div class="summary-tab-panel" id="summary-panel-countries">
             <div class="country-summary" id="country-summary"></div>

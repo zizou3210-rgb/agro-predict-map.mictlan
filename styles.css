@@ -2930,6 +2930,7 @@ h1 {
 
 .summary-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 16px;
 }
@@ -2955,6 +2956,114 @@ h1 {
 
 .summary-tab-panel {
   margin-top: 16px;
+}
+
+.prediction-statistics-table-wrap {
+  max-width: 100%;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  border: 1px solid rgba(31, 42, 47, 0.12);
+  border-radius: 14px;
+}
+
+.prediction-statistics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.prediction-statistics-actions {
+  margin-bottom: 14px;
+}
+
+.upload-button.prediction-statistics-download {
+  gap: 8px;
+  color: #fff;
+  background: #2e7d32;
+}
+
+.upload-button.prediction-statistics-download:hover {
+  background: #256629;
+}
+
+.prediction-statistics-download:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.prediction-statistics-table caption {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #f8faf9;
+  padding: 14px;
+  text-align: left;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.prediction-statistics-table th,
+.prediction-statistics-table td {
+  padding: 12px 14px;
+  border-top: 1px solid rgba(31, 42, 47, 0.09);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.prediction-statistics-table th:nth-child(-n+3),
+.prediction-statistics-table td:nth-child(-n+3) {
+  text-align: left;
+}
+
+.prediction-statistics-table thead th {
+  position: sticky;
+  top: var(--statistics-caption-height, 48px);
+  z-index: 2;
+  background: #e8edeb;
+  white-space: normal;
+  min-width: 80px;
+}
+
+.prediction-statistics-table tbody th {
+  font-weight: 500;
+}
+
+.prediction-statistics-table tbody tr:hover {
+  background: rgba(36, 58, 64, 0.04);
+}
+
+.prediction-statistics-table tfoot th,
+.prediction-statistics-table tfoot td {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: #e8edeb;
+}
+
+.prediction-statistics-table tfoot {
+  font-weight: 700;
+  background: rgba(36, 58, 64, 0.07);
+}
+
+.prediction-statistics-color {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.prediction-statistics-swatch {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+}
+
+.prediction-statistics-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.6;
 }
 
 .summary-log {
