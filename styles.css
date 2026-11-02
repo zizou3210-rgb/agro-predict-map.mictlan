@@ -2973,12 +2973,26 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
-.prediction-statistics-actions {
+.prediction-statistics-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
   margin-bottom: 14px;
 }
 
+.prediction-statistics-heading h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
 .upload-button.prediction-statistics-download {
-  gap: 8px;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  padding: 0;
   color: #fff;
   background: #2e7d32;
 }
@@ -2990,17 +3004,6 @@ h1 {
 .prediction-statistics-download:disabled {
   opacity: 0.6;
   cursor: wait;
-}
-
-.prediction-statistics-table caption {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background: #f8faf9;
-  padding: 14px;
-  text-align: left;
-  font-weight: 700;
-  color: var(--ink);
 }
 
 .prediction-statistics-table th,
@@ -3018,7 +3021,7 @@ h1 {
 
 .prediction-statistics-table thead th {
   position: sticky;
-  top: var(--statistics-caption-height, 48px);
+  top: 0;
   z-index: 2;
   background: #e8edeb;
   white-space: normal;

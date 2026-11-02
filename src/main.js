@@ -8696,14 +8696,13 @@ const renderPredictionStatistics = (featureLookup, numericLookup = null) => {
     ${cells(row)}${statistics(row)}</tr>`).join("");
   const columns = predictionStatisticsColumns(criterion);
   predictionStatisticsResizeObserver?.disconnect();
-  predictionStatisticsContainer.innerHTML = `<div class="prediction-statistics-actions">
-      <button class="upload-button prediction-statistics-download" type="button">
+  predictionStatisticsContainer.innerHTML = `<div class="prediction-statistics-heading">
+      <h3 id="prediction-statistics-title">Winning results per cell · ${escapeHtml(target)}</h3>
+      <button class="upload-button prediction-statistics-download" type="button" aria-label="Download CSV" title="Download CSV">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v5h14v-5"/></svg>
-        Download CSV
       </button></div>
     <div class="prediction-statistics-table-wrap" role="region" aria-label="Winning prediction statistics" tabindex="0">
-    <table class="prediction-statistics-table">
-      <caption>Winning results per cell · ${escapeHtml(target)}</caption>
+    <table class="prediction-statistics-table" aria-labelledby="prediction-statistics-title">
       <thead><tr>${columns.map(title => `<th scope="col">${escapeHtml(title)}</th>`).join("")}</tr></thead>
       <tbody>${rows}</tbody><tfoot><tr><th scope="row">Total</th><td></td><td></td>${cells(result.total)}${statistics(result.total)}</tr></tfoot>
     </table></div>
@@ -8712,13 +8711,11 @@ const renderPredictionStatistics = (featureLookup, numericLookup = null) => {
   const wrapper = table.parentElement;
   const sizeVisibleRows = () => {
     if (!table.offsetHeight) return;
-    const captionHeight = table.caption.getBoundingClientRect().height;
     const bodyHeight = Array.from(table.tBodies[0].rows).slice(0, 5)
       .reduce((height, row) => height + row.getBoundingClientRect().height, 0);
-    wrapper.style.setProperty("--statistics-caption-height", `${captionHeight}px`);
     // Include the horizontal scrollbar so exactly five body rows remain visible.
     const scrollbarHeight = wrapper.offsetHeight - wrapper.clientHeight - 2;
-    wrapper.style.maxHeight = `${Math.ceil(captionHeight + table.tHead.getBoundingClientRect().height +
+    wrapper.style.maxHeight = `${Math.ceil(table.tHead.getBoundingClientRect().height +
       bodyHeight + table.tFoot.getBoundingClientRect().height + scrollbarHeight + 2)}px`;
   };
   predictionStatisticsResizeObserver = new ResizeObserver(sizeVisibleRows);
@@ -8731,7 +8728,7 @@ const renderPredictionStatistics = (featureLookup, numericLookup = null) => {
     try {
       await triggerBrowserDownload(objectUrl, {
         suggestedFilename: "winning_results_per_cell.csv",
-        useNativePrompt: true,
+        promptForFilename: false,
         bypassDownloadGate: true,
       });
     } finally {
