@@ -36,24 +36,30 @@ def print_progress_from_queue(progress_queue: Queue):
 
 
 def log_progress_from_queue(progress_queue: Queue, log_file: str):
-    """Monitors a queue and logs progress updates to a file."""
-    logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-        encoding='utf-8',
-        force=True,
-    )
-    while True:
-        message = progress_queue.get()
-        if message == "DONE":
-            logging.info("Process completed.")
-            break
-        if isinstance(message, str) and message.startswith("[ERROR]"):
-            logging.error(message)
-            break
-        if isinstance(message, int):
-            logging.info("Progress: %d%%", message)
+    """Use the worker's redirected stdout as the single writer to log_file.
+
+    The background launcher already opens log_file and redirects stdout/stderr.
+    Opening it again with FileHandler can overwrite buffered output on Windows.
+    """
+    logger = logging.Logger("featurehero.progress", level=logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+    logger.addHandler(handler)
+    try:
+        while True:
+            message = progress_queue.get()
+            if message == "DONE":
+                logger.info("Process completed.")
+                break
+            if isinstance(message, str) and message.startswith("[ERROR]"):
+                logger.error(message)
+                break
+            if isinstance(message, int):
+                logger.info("Progress: %d%%", message)
+    finally:
+        handler.flush()
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def run_worker(file_path: str, target_column: str, params: dict):
@@ -424,8 +430,7 @@ def run_worker_background(file_path: str, target_column: str, log_file: str,
     finally:
         # Drain the terminal event so errors are not lost when the daemon exits.
         progress_queue.put("DONE")
-        log_thread.join(timeout=5)
-        logging.shutdown()
+        log_thread.join()
         # Ensure the job is deregistered when it finishes or fails
         job_manager.deregister_job(pid)
 

@@ -17,6 +17,10 @@ PARAMS = {'number_generation':10,'number_population':10,
 
 
 class FeatureHeroTrainingTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.enterClassContext(patch.object(sys, 'path', [str(ROOT/'resources/featurehero'), *sys.path]))
+
     def launch(self, root, valid=True):
         data = root / 'input.csv'
         with data.open('w', newline='', encoding='utf-8') as handle:
@@ -45,6 +49,41 @@ class FeatureHeroTrainingTest(unittest.TestCase):
                 self.assertGreater((workspace/name).stat().st_size,0)
             log = Path(info['log_file']).read_text(encoding='utf-8')
             self.assertIn('Process completed.',log)
+            import joblib
+            import numpy as np
+            import pandas as pd
+            model = joblib.load(workspace/'best_model_sort_original.pkl')
+            mask = joblib.load(workspace/'best_features_sort_original.pkl')
+            frame = pd.read_csv(workspace/'sort_original.csv').drop(columns=['yield'])
+            prediction = model.prediction(frame.loc[:, mask].to_numpy())
+            self.assertEqual(len(prediction), 80)
+            self.assertTrue(np.isfinite(prediction).all())
+
+    def test_progress_and_console_output_share_a_single_log_handle(self):
+        sys.path.insert(0,str(ROOT/'resources/featurehero'))
+        try:
+            from featurehero.main import log_progress_from_queue
+            from contextlib import redirect_stdout
+            from queue import Queue
+            with tempfile.TemporaryDirectory() as directory:
+                log = Path(directory)/'worker.log'
+                queue=Queue()
+                for event in (10, 100, 'DONE'):
+                    queue.put(event)
+                with log.open('w', encoding='utf-8') as stream, redirect_stdout(stream), patch(
+                    'logging.FileHandler', side_effect=AssertionError('A second log handle would corrupt output on Windows')
+                ):
+                    print('Training output before progress')
+                    log_progress_from_queue(queue, str(log))
+                    print('Training output after progress')
+                contents=log.read_text(encoding='utf-8')
+                self.assertIn('Training output before progress',contents)
+                self.assertIn('Progress: 10%',contents)
+                self.assertIn('Progress: 100%',contents)
+                self.assertIn('Process completed.',contents)
+                self.assertIn('Training output after progress',contents)
+        finally:
+            sys.path.pop(0)
 
     def test_background_failure_exposes_original_error_instead_of_missing_pickle(self):
         with tempfile.TemporaryDirectory(prefix='featurehero failed ') as directory:
