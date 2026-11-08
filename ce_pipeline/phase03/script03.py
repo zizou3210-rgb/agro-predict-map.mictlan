@@ -976,7 +976,31 @@ def _download_with_retries(url: str, target_path: Path) -> None:
         )
         try:
             with urlopen(request, timeout=ea_pipeline.HTTP_TIMEOUT_SECONDS, context=ssl_context) as response:
-                payload = response.read()
+                # A socket timeout only limits inactivity. A server sending a
+                # trickle of bytes can keep read() blocked indefinitely.
+                deadline = attempt_started_at + 2 * ea_pipeline.HTTP_TIMEOUT_SECONDS
+                payload = bytearray()
+                last_report_at = attempt_started_at
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Climate raster download exceeded its attempt time limit")
+                    # read1 returns after one underlying read, allowing the
+                    # deadline to be checked even during a slow response.
+                    chunk = response.read1(256 * 1024)
+                    now = time.monotonic()
+                    if now >= deadline:
+                        raise TimeoutError("Climate raster download exceeded its attempt time limit")
+                    if not chunk:
+                        break
+                    payload.extend(chunk)
+                    if now - last_report_at >= 1:
+                        append_thread_climate_debug_log("raster_download_progress", {
+                            "attempt": attempt, "download_bytes": len(payload),
+                        })
+                        last_report_at = now
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None and len(payload) != int(content_length):
+                    raise OSError("Incomplete climate raster download")
             append_thread_climate_debug_log(
                 "raster_download_response_received",
                 {
@@ -1817,6 +1841,7 @@ def prefetch_chc_rasters(
         def update_operation(event, payload):
             operations = {
                 "raster_download_attempt_started": "downloading raster",
+                "raster_download_progress": "downloading raster",
                 "raster_download_response_received": "saving raster",
                 "raster_download_attempt_completed": "validating raster",
                 "raster_download_attempt_failed": "download attempt failed",
@@ -1824,7 +1849,8 @@ def prefetch_chc_rasters(
             }
             if event in operations:
                 set_task_state(dataset, current_date, operations[event],
-                    attempt=payload.get("attempt"), retry_wait_seconds=payload.get("sleep_seconds"))
+                    attempt=payload.get("attempt"), retry_wait_seconds=payload.get("sleep_seconds"),
+                    download_bytes=payload.get("download_bytes"))
         previous_hook = getattr(_THREAD_LOCAL_RASTER_STATE, "prefetch_progress_hook", None)
         _THREAD_LOCAL_RASTER_STATE.prefetch_progress_hook = update_operation
         set_task_state(dataset, current_date, "resolving cached or remote raster")
@@ -1881,6 +1907,8 @@ def prefetch_chc_rasters(
                 message += f" Attempt: {current['attempt']}/{ea_pipeline.MAX_RETRIES}."
             if current.get("retry_wait_seconds") is not None:
                 message += f" Retry delay: {current['retry_wait_seconds']}s."
+            if current.get("download_bytes") is not None:
+                message += f" Received: {current['download_bytes'] / (1024 * 1024):.1f} MiB."
         if remaining_tasks:
             message += f" Last file completed: {since_completion:.0f}s ago." if completed_tasks else " No files have completed yet."
         details = {

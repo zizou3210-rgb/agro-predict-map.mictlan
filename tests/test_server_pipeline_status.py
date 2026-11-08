@@ -11,6 +11,56 @@ from server import AppRequestHandler
 
 
 class PipelineStatusTest(unittest.TestCase):
+    def test_cleanup_preserves_live_training_input_for_both_cleanup_paths(self):
+        for cleanup in (server.cleanup_previous_pipeline_run_dirs, server.cleanup_stale_pipeline_run_dirs):
+            with self.subTest(cleanup=cleanup.__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                training = root / "training"
+                training.mkdir()
+                (training / "input.xlsx").write_bytes(b"training input")
+                worker = Mock()
+                worker.is_alive.return_value = True
+                with patch.object(server, "PIPELINE_RUNS_DIR", root), patch.dict(
+                    server.PIPELINE_JOBS, {}, clear=True,
+                ), patch.dict(server.CE_SUMMARY_JOBS, {"training": {"run_dir": training, "thread": worker}}, clear=True), patch.object(
+                    server, "PIPELINE_FAILED_RUN_DIR_RETENTION_SECONDS", -1,
+                ):
+                    cleanup()
+                self.assertEqual((training / "input.xlsx").read_bytes(), b"training input")
+
+    def test_summary_without_live_worker_reports_interruption_and_preserves_counters(self):
+        for alive in (True, False, None):
+            with self.subTest(alive=alive), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                progress = root / "ce_summary_progress.json"
+                progress.write_text(json.dumps({"status": "running", "percent": 16,
+                    "details": {"stage_completed": 158, "stage_total": 1860}}))
+                job = {"run_dir": root, "progress_file": progress, "result_file": root / "result.json"}
+                if alive is not None:
+                    job["thread"] = Mock()
+                    job["thread"].is_alive.return_value = alive
+                handler = object.__new__(AppRequestHandler)
+                handler.load_ce_summary_job = Mock(return_value=job)
+                response, _, _, status = handler.build_ce_summary_response_payload("training")
+                self.assertEqual(status, "running" if alive else "error")
+                self.assertEqual(response["progress"]["details"]["stage_completed"], 158)
+                self.assertEqual(json.loads(progress.read_text())["status"], status)
+
+    def test_runtime_status_includes_live_model_creation(self):
+        handler = object.__new__(AppRequestHandler)
+        handler.send_json = Mock()
+        worker = Mock()
+        worker.is_alive.return_value = True
+        with patch.dict(server.CE_SUMMARY_JOBS, {"training": {"thread": worker}}, clear=True), patch.object(
+            server, "reap_finished_pipeline_jobs",
+        ), patch.object(server, "cleanup_stale_pipeline_run_dirs"), patch.object(
+            server, "get_active_featurehero_jobs", return_value={},
+        ), patch.object(server, "get_active_pipeline_job_count", return_value=0):
+            handler.handle_runtime_status()
+        response = handler.send_json.call_args.args[0]
+        self.assertEqual(response["active_training_jobs"], 1)
+        self.assertTrue(response["has_active_runtime_jobs"])
+
     def test_cancel_all_includes_processes_recovered_after_server_restart(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             server, "terminate_existing_pipeline_processes", return_value=2,

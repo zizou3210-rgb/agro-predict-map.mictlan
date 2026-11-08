@@ -145,6 +145,8 @@ jobs:
           python -c "import os, sys, unittest; os.environ['APP_INSTALLER_TEST_PYTHON'] = sys.executable; suite = unittest.defaultTestLoader.discover('tests', pattern='test_installer_packaging.py'); result = unittest.TextTestRunner(verbosity=2).run(suite); sys.exit(0 if result.wasSuccessful() else 1)"
           python -m unittest discover -s tests -p test_ce_script_entrypoints.py -v
           python -m unittest discover -s tests -p test_climate_prefetch_progress.py -v
+          python -m unittest discover -s tests -p test_climate_downloads.py -v
+          python -m unittest discover -s tests -p test_server_pipeline_status.py -v
 
       - name: FeatureHero training tests (temporarily skipped)
         if: ${{ false }}
