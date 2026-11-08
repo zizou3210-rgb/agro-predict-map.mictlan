@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from zipfile import ZIP_STORED, ZipFile
 
-from build_installer_bundle import BUNDLE_DIR, DIST_DIR, main as build_bundle
+from build_installer_bundle import BUNDLE_DIR, DIST_DIR, main as build_bundle, write_installer_archive
 
 
 PLATFORMS = ("linux", "windows", "macos")
@@ -74,22 +73,12 @@ def should_include(relative_path: Path, platform_name: str) -> bool:
 def build_platform_zip(platform_name: str) -> Path:
     archive_root = f"Mictlan-AgriXGBoost-installer-{platform_name}"
     archive_path = DIST_DIR / f"{archive_root}.zip"
-    if archive_path.exists():
-        archive_path.unlink()
-
-    with ZipFile(archive_path, "w", compression=ZIP_STORED, allowZip64=True) as zip_file:
-        for source_path in sorted(BUNDLE_DIR.rglob("*")):
-            if source_path.is_dir():
-                continue
-            relative_path = source_path.relative_to(BUNDLE_DIR)
-            if not should_include(relative_path, platform_name):
-                continue
-            zip_file.write(source_path, arcname=str(Path(archive_root) / relative_path))
-
-        zip_file.writestr(
-            str(Path(archive_root) / "PLATFORM-NOTES.txt"),
-            _platform_note(platform_name),
-        )
+    write_installer_archive(
+        BUNDLE_DIR, archive_path, archive_root,
+        include=lambda relative: should_include(relative, platform_name),
+        entrypoints=(ENTRYPOINT_BY_PLATFORM[platform_name],),
+        notes={"PLATFORM-NOTES.txt": _platform_note(platform_name)},
+    )
 
     return archive_path
 

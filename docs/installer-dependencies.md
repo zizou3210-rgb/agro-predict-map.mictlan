@@ -6,6 +6,8 @@ La instalación copia el código de la app y crea un entorno Python **3.12** en 
 
 Se comprueba la presencia y la importación real de `featurehero`, `pandas`, `numpy`, `openpyxl`, `certifi`, `PIL` (Pillow), `rasterio`, `psutil`, `pykrige`, `sklearn` (scikit-learn), `xgboost`, `matplotlib`, `seaborn`, `numbers_parser`, `scipy` y `joblib`. SciPy y joblib son dependencias transitivas de las bibliotecas declaradas; también se validan porque el código las utiliza.
 
+La instalación ejecuta también los scripts de las fases CE con `--help` en procesos separados y sin `PYTHONPATH` heredado. Esto comprueba la misma forma de arranque que utiliza New Workspace.
+
 La instalación importa los puntos de entrada del servidor, preprocesamiento, entrenamiento, predicción y FeatureHero antes de declararse terminada. Esto detecta archivos faltantes, dependencias binarias incompatibles y módulos instalados en un intérprete distinto.
 
 `resources/phen_transform_dataset` está incluido como recurso, pero sus servicios Celery/Redis y su entorno Docker no se ejecutan en el flujo de escritorio actual; su antiguo `requirements.txt` no se mezcla con el entorno de FeatureHero.
@@ -18,6 +20,8 @@ La instalación importa los puntos de entrada del servidor, preprocesamiento, en
 - Recursos: código y configuración de FeatureHero, mapas de países y plantilla canónica.
 - Lanzadores y metadatos: `installers` y `package.json`.
 - Modelo entrenado: se conserva la regla existente de empaquetar el modelo más reciente cuando está disponible, sin incorporar las corridas temporales.
+
+Los generadores del ZIP universal, los paquetes por plataforma y los paquetes nativos de Windows/Linux/macOS utilizan la misma función de escritura y validación. Antes de publicar el ZIP, comprueban que los archivos obligatorios estén presentes y que sus bytes coincidan con el código fuente actual. Un archivo faltante, filtrado por error o desactualizado impide publicar el paquete. La escritura usa un archivo temporal y conserva el ZIP anterior si la validación falla.
 
 `REQUIRED_APP_ENTRIES` y `REQUIRED_APP_FILES`, en `installers/desktop_installer.py`, definen la validación. Si falta un archivo obligatorio, se rechaza el paquete antes de modificar una instalación anterior. `.env` continúa siendo opcional en la copia; la compilación de CI lo obtiene de los secretos configurados.
 

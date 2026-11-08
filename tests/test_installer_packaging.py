@@ -24,6 +24,8 @@ with mock.patch.object(sys, "path", [str(PROJECT_DIR / "installers"), *sys.path]
     import build_installer_bundle as bundle
     import build_native_runtime_packages as native
     import launch_mictlan_agrixgboost as launcher
+    import build_platform_installer_packages as platform_packages
+    import build_installer_zip as universal
 
 
 class InstallerPackagingTest(unittest.TestCase):
@@ -43,6 +45,8 @@ class InstallerPackagingTest(unittest.TestCase):
             target = source / entry
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(PROJECT_DIR / entry, target)
+        for name in platform_packages.ENTRYPOINT_BY_PLATFORM.values():
+            shutil.copy2(PROJECT_DIR / "installers" / name, source / "installers" / name)
         return source
 
     def test_active_python_imports_have_runtime_dependencies(self):
@@ -132,7 +136,78 @@ class InstallerPackagingTest(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 bundle.main()
-                installer.validate_installed_app_imports(target, os.environ["APP_INSTALLER_TEST_PYTHON"])
+                archive = Path(temporary) / "installer.zip"
+                bundle.write_installer_archive(target, archive, "installer")
+                extracted = Path(temporary) / "extracted"
+                with ZipFile(archive) as zipped:
+                    zipped.extractall(extracted)
+                installer.validate_installed_app_imports(extracted / "installer", os.environ["APP_INSTALLER_TEST_PYTHON"])
+
+    def test_all_platform_archives_contain_current_ce_scripts(self):
+        with tempfile.TemporaryDirectory(prefix="all_installers_") as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            dist = root / "dist"
+            bundled = dist / "bundle"
+            runtimes = root / "runtimes"
+            for platform_name, markers in native.EXPECTED_RUNTIME_MARKERS.items():
+                for marker in markers:
+                    target = runtimes / platform_name / marker
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"test runtime marker")
+            with (
+                mock.patch.object(bundle, "APP_DIR", source),
+                mock.patch.object(installer, "APP_DIR", source),
+                mock.patch.object(bundle, "INSTALLERS_DIR", source / "installers"),
+                mock.patch.object(bundle, "BUNDLE_DIR", bundled),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                bundle.main()
+            for platform_name in native.PLATFORMS:
+                with (
+                    self.subTest(platform=platform_name),
+                    mock.patch.object(native, "BUNDLE_DIR", bundled),
+                    mock.patch.object(native, "DIST_DIR", dist),
+                    mock.patch.object(native, "RUNTIMES_DIR", runtimes),
+                    mock.patch.object(platform_packages, "BUNDLE_DIR", bundled),
+                    mock.patch.object(platform_packages, "DIST_DIR", dist),
+                ):
+                    native_archive = native.build_platform_archive(platform_name)
+                    native.clean_previous_platform_runtime(bundled)
+                    platform_archive = platform_packages.build_platform_zip(platform_name)
+                    for archive in (native_archive, platform_archive):
+                        with ZipFile(archive) as zipped:
+                            prefix = archive.stem
+                            for relative in ("tabular_io.py", "ce_pipeline/phase01/phase1.py", "ce_pipeline/phase02/phase02.py"):
+                                self.assertEqual(zipped.read(f"{prefix}/{relative}"), (PROJECT_DIR / relative).read_bytes())
+            universal_archive = dist / "universal.zip"
+            with (
+                mock.patch.object(universal, "BUNDLE_DIR", bundled),
+                mock.patch.object(universal, "ZIP_PATH", universal_archive),
+                mock.patch.object(universal, "build_bundle"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                universal.main()
+            with ZipFile(universal_archive) as zipped:
+                self.assertIn("bundle/tabular_io.py", zipped.namelist())
+
+    def test_archive_rejects_missing_or_stale_code_and_keeps_previous_zip(self):
+        with tempfile.TemporaryDirectory(prefix="installer_archive_check_") as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            archive = root / "installer.zip"
+            archive.write_bytes(b"previous valid archive")
+            phase = source / "ce_pipeline/phase01/phase1.py"
+            phase.write_text("# outdated phase without import bootstrap", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "outdated or altered"):
+                bundle.write_installer_archive(source, archive, "installer")
+            self.assertEqual(archive.read_bytes(), b"previous valid archive")
+            shutil.copy2(PROJECT_DIR / "ce_pipeline/phase01/phase1.py", phase)
+            with self.assertRaisesRegex(ValueError, "missing required file: tabular_io.py"):
+                bundle.write_installer_archive(source, archive, "installer",
+                    include=lambda relative: relative != Path("tabular_io.py"))
+            self.assertEqual(archive.read_bytes(), b"previous valid archive")
+            self.assertFalse(archive.with_suffix(".zip.tmp").exists())
 
     def test_root_python_dependencies_are_packaged(self):
         required = set(installer.REQUIRED_APP_ENTRIES)

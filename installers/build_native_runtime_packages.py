@@ -4,9 +4,8 @@ from __future__ import annotations
 import shutil
 import sys
 from pathlib import Path
-from zipfile import ZIP_STORED, ZipFile
 
-from build_installer_bundle import BUNDLE_DIR, DIST_DIR, main as build_bundle
+from build_installer_bundle import BUNDLE_DIR, DIST_DIR, main as build_bundle, write_installer_archive
 
 
 INSTALLERS_DIR = Path(__file__).resolve().parent
@@ -69,28 +68,18 @@ def stage_platform_runtime(bundle_root: Path, platform_name: str) -> None:
 def build_platform_archive(platform_name: str) -> Path:
     archive_root = f"Mictlan-AgriXGBoost-installer-{platform_name}-native"
     archive_path = DIST_DIR / f"{archive_root}.zip"
-    if archive_path.exists():
-        archive_path.unlink()
-
+    ensure_runtime(platform_name)
     clean_previous_platform_runtime(BUNDLE_DIR)
     stage_platform_runtime(BUNDLE_DIR, platform_name)
-
-    with ZipFile(archive_path, "w", compression=ZIP_STORED, allowZip64=True) as zip_file:
-        for source_path in sorted(BUNDLE_DIR.rglob("*")):
-            if source_path.is_dir():
-                continue
-            relative = source_path.relative_to(BUNDLE_DIR)
-            zip_file.write(source_path, arcname=str(Path(archive_root) / relative))
-
-        zip_file.writestr(
-            str(Path(archive_root) / "RUNTIME-NOTES.txt"),
-            (
-                f"Native runtime package for {platform_name}\n"
-                "\n"
-                f"This archive includes the application bundle plus the native runtime copied from:\n"
-                f"{runtime_dir(platform_name)}\n"
-            ),
-        )
+    entrypoint = {
+        "windows": "Mictlan-AgriXGBoost_Installer.bat",
+        "linux": "Mictlan-AgriXGBoost_Installer.sh",
+        "macos": "Mictlan-AgriXGBoost_Installer.command",
+    }[platform_name]
+    write_installer_archive(
+        BUNDLE_DIR, archive_path, archive_root, entrypoints=(entrypoint,),
+        notes={"RUNTIME-NOTES.txt": f"Native runtime package for {platform_name}\n"},
+    )
     return archive_path
 
 
