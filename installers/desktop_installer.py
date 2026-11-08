@@ -48,6 +48,12 @@ APP_IMPORT_CHECK_MODULES = (
     "preprocess.runner", "ce_pipeline.training", "ce_pipeline.prediction.prediction",
     "featurehero.main",
 )
+APP_SCRIPT_CHECK_FILES = (
+    "ce_pipeline/phase01/phase1.py", "ce_pipeline/phase02/phase02.py",
+    "ce_pipeline/phase03/script03.py", "ce_pipeline/phase04/phase04.py",
+    "ce_pipeline/phase05/phase05.py", "ce_pipeline/phase06/phase06.py",
+    "ce_pipeline/training.py", "pipeline/run_pipeline.py",
+)
 REQUIRED_APP_ENTRIES = [
     "__init__.py",
     "config_env.py",
@@ -611,10 +617,18 @@ def validate_installed_app_imports(app_dir: Path, python_exec: Path | str) -> No
             check=True, capture_output=True, text=True,
             env=env, timeout=120,
         )
+        # These entry points are launched by filename in separate processes.
+        # Module imports alone do not exercise their sys.path bootstrapping.
+        for relative in APP_SCRIPT_CHECK_FILES:
+            subprocess.run(
+                [str(python_exec), str((app_dir / relative).resolve()), "--help"],
+                cwd=str(app_dir), check=True, capture_output=True, text=True,
+                env=env, timeout=120,
+            )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         details = getattr(exc, "stderr", "") or getattr(exc, "stdout", "") or str(exc)
         raise RuntimeError(f"The installed application failed its import check:\n{details}") from exc
-    console_log("[installer] Installed application imports validated successfully")
+    console_log("[installer] Installed application imports and script entry points validated successfully")
 
 
 def windows_targets() -> list[Path]:

@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import sys
+    from pathlib import Path
+
+    APP_BOOT_DIR = Path(__file__).resolve().parents[2]
+    if str(APP_BOOT_DIR) not in sys.path:
+        sys.path.insert(0, str(APP_BOOT_DIR))
+
 from tabular_io import read_records, write_rows
 
 import argparse

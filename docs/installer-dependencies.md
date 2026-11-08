@@ -6,6 +6,8 @@ La instalación copia el código de la app y crea un entorno Python **3.12** en 
 
 Se comprueba la presencia y la importación real de `featurehero`, `pandas`, `numpy`, `openpyxl`, `certifi`, `PIL` (Pillow), `rasterio`, `psutil`, `pykrige`, `sklearn` (scikit-learn), `xgboost`, `matplotlib`, `seaborn`, `numbers_parser`, `scipy` y `joblib`. SciPy y joblib son dependencias transitivas de las bibliotecas declaradas; también se validan porque el código las utiliza.
 
+La instalación ejecuta también los scripts de las fases CE con `--help` en procesos separados y sin `PYTHONPATH` heredado. Esto comprueba la misma forma de arranque que utiliza New Workspace.
+
 La instalación importa los puntos de entrada del servidor, preprocesamiento, entrenamiento, predicción y FeatureHero antes de declararse terminada. Esto detecta archivos faltantes, dependencias binarias incompatibles y módulos instalados en un intérprete distinto.
 
 `resources/phen_transform_dataset` está incluido como recurso, pero sus servicios Celery/Redis y su entorno Docker no se ejecutan en el flujo de escritorio actual; su antiguo `requirements.txt` no se mezcla con el entorno de FeatureHero.
