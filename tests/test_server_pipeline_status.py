@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +74,34 @@ class PipelineStatusTest(unittest.TestCase):
             cancel.assert_called_once()
             self.assertEqual(handler.send_json.call_args.args[0]["cancelled_pipeline_jobs"], 2)
 
+    def test_tracked_cancellation_on_windows_and_posix(self):
+        for platform in ("nt", "posix"):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
+                run_dir = Path(directory) / "job"
+                process = Mock(pid=99999991)
+                process.poll.return_value = None
+                job = {"process": process, "run_dir": run_dir}
+                platform_os = Mock(wraps=server.os)
+                platform_os.name = platform
+                # Patch only server's os reference; changing os.name globally
+                # would also change pathlib's native path implementation.
+                with patch.object(server, "os", platform_os), patch.dict(
+                    server.PIPELINE_JOBS, {"job": job}, clear=True,
+                ), patch.object(server, "reap_finished_pipeline_jobs"), patch.object(
+                    server.subprocess, "run", return_value=Mock(stdout=""),
+                ) as scan, patch.object(server, "_write_pipeline_progress_status") as mark:
+                    self.assertEqual(server.terminate_existing_pipeline_processes(), 1)
+                    process.terminate.assert_called_once_with()
+                    self.assertEqual(job["final_status"], "cancelled")
+                    mark.assert_called_once_with(run_dir, status="cancelled",
+                        message="The pipeline job was cancelled before starting a new run.")
+                    if platform == "nt":
+                        scan.assert_not_called()
+                    else:
+                        scan.assert_called_once_with(["ps", "-eo", "pid=,args="],
+                            check=False, capture_output=True, text=True)
+
+    @unittest.skipIf(os.name == "nt", "Orphan discovery uses POSIX ps; Windows cancels tracked jobs")
     def test_orphan_cancellation_marks_its_run_and_ignores_non_python_commands(self):
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory) / "job"
