@@ -1,0 +1,5 @@
+This fixture projects the real High-Potential Sites run `20261025-123514-1817083d` onto four columns: cell ID, genotype, Farm and predicted yield. It retains all 2,349 predictions from `ce_pipeline_prediction/prediction.csv`, verified equal to the corresponding projection of `phase05/model/ce_phase05_with_predictions.geojson`, plus all 261 winners from `prediction_display.geojson`.
+
+Expected statistics were calculated independently with Python `statistics.mean`, `median` and `quantiles(method="inclusive")`, taking the first maximum per cell in exported row order (the map's tie rule). There are nine genotype/Farm participants, including six with zero wins. The filtered case selects Farm 11 of CIM-RT-EAPP2-L-008, which initially wins no cells.
+
+Run `node tests/test_prediction_statistics_results.cjs`. It exercises the application's actual competition function and statistics/CSV module and compares every row and total against these fixed expectations, including percentages, 25 km² per cell and all six statistics. No local runtime files or model execution are required.

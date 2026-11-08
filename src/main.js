@@ -10,6 +10,8 @@ import {
 import { renderSelectColumnm } from "./selectColumnm.js";
 import { renderSelectColumnClassifier } from "./selectColumnClassifier.js";
 import { renderSelectionSummary } from "./summary.js";
+import { buildPredictionStatistics, predictionStatisticsColumns, predictionStatisticsCsv } from "./predictionStatistics.js";
+import { multiProfilePalette, getPredictionProfilePaletteColor, getPredictionProfileColorName } from "./predictionColors.js";
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
@@ -74,18 +76,6 @@ const countryPalette = [
   "#d7d1c8",
   "#cad2c0",
 ];
-const multiProfilePalette = [
-  "#2e7d32",
-  "#d35400",
-  "#7b1fa2",
-  "#1565c0",
-  "#c62828",
-  "#6d4c41",
-  "#fbc02d",
-  "#00838f",
-  "#ad1457",
-  "#455a64",
-];
 
 const svg = d3.select("#map");
 const mapFrame = document.getElementById("map-frame");
@@ -103,6 +93,11 @@ const pageIndicator = document.getElementById("page-indicator");
 const prevPageButton = document.getElementById("prev-page");
 const nextPageButton = document.getElementById("next-page");
 const summaryTabCountriesButton = document.getElementById("summary-tab-countries");
+const summaryTabStatisticsButton = document.getElementById("summary-tab-statistics");
+const summaryPanelStatistics = document.getElementById("summary-panel-statistics");
+const predictionStatisticsContainer = document.getElementById("prediction-statistics");
+let predictionStatisticsRenderCache = null;
+let predictionStatisticsResizeObserver = null;
 const summaryTabStatsButton = document.getElementById("summary-tab-stats");
 const summaryTabLogButton = document.getElementById("summary-tab-log");
 const summaryPanelCountries = document.getElementById("summary-panel-countries");
@@ -832,6 +827,9 @@ const promptForDownloadFilename = (suggestedFilename = "prediction_output.xlsx")
     window.alert("The file name cannot be empty.");
     return null;
   }
+  if (suffix.toLowerCase() === ".csv") {
+    return /\.csv$/i.test(normalizedEnteredName) ? normalizedEnteredName : `${normalizedEnteredName}.csv`;
+  }
   return normalizedEnteredName.includes(".")
     ? normalizedEnteredName
     : `${normalizedEnteredName}${suffix}`;
@@ -1168,6 +1166,9 @@ const setWorkflowInteractive = (enabled) => {
   refreshMapAvailability();
   summaryTabCountriesButton.disabled = !enabled;
   summaryTabStatsButton.disabled = !enabled;
+  if (summaryTabStatisticsButton) {
+    summaryTabStatisticsButton.disabled = !enabled;
+  }
   if (summaryTabLogButton) {
     summaryTabLogButton.disabled = !enabled;
   }
@@ -1778,49 +1779,38 @@ const mergePredictionCategoryLabels = (...labelGroups) => {
 };
 
 const getPredictionProfileColorMap = () => {
-  if (isCategoricalPredictionColorMode() && getPredictionSelectedIdHeader()) {
-    const featureLabels = Array.from(
-      new Set(
-        (loadedFeatures.length
-          ? loadedFeatures
-          : Array.isArray(datasetStore.prediction?.geojson?.features)
-            ? datasetStore.prediction.geojson.features
-            : []
-        )
-          .map((feature) => getPredictionCategoryLabelForFeature(feature))
-          .filter(Boolean),
-      ),
-    ).sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base", numeric: true }));
-    const labels = mergePredictionCategoryLabels(featureLabels, getSelectedPredictionNameIdLabels());
-    return new Map(
-      labels.map((label, index) => [label, multiProfilePalette[index % multiProfilePalette.length]]),
-    );
+  const categorical = isCategoricalPredictionColorMode();
+  const selectedId = getPredictionSelectedIdHeader();
+  const prediction = datasetStore.prediction;
+  const selectedLabels = categorical && selectedId ? getSelectedPredictionNameIdLabels() : [];
+  const inputs = [categorical, selectedId, loadedFeatures, prediction?.rawGeojson?.features,
+    prediction?.geojson?.features, prediction?.summary, JSON.stringify(selectedLabels)];
+  const cached = getPredictionProfileColorMap.cache;
+  if (cached && inputs.every((input, index) => input === cached.inputs[index])) {
+    return cached.colors;
   }
-  if (isMultiGermplasmPredictionResult()) {
-    const labels = getPredictionDistinctGermplasmNames();
-    return new Map(
-      labels.map((label, index) => [label, multiProfilePalette[index % multiProfilePalette.length]]),
-    );
+  const summaryProfiles = Array.isArray(prediction?.summary?.profile_summaries)
+    ? prediction.summary.profile_summaries : [];
+  let labels;
+  if (categorical && selectedId) {
+    // Include every competitor, even when it wins no cells or is unchecked.
+    const featureLabels = [prediction?.rawGeojson?.features ?? [],
+      prediction?.geojson?.features ?? [], loadedFeatures]
+      .flatMap(features => features.map(getPredictionCategoryLabelForFeature));
+    labels = mergePredictionCategoryLabels(featureLabels, selectedLabels,
+      summaryProfiles.map(profile => profile?.label));
+  } else if (isMultiGermplasmPredictionResult()) {
+    labels = getPredictionDistinctGermplasmNames();
+  } else {
+    labels = [...new Set(summaryProfiles.map(profile => String(profile?.label ?? "").trim()).filter(Boolean))];
+    if (!labels.length) {
+      labels = [...new Set((prediction?.rawGeojson?.features ?? prediction?.geojson?.features ?? [])
+        .map(feature => String(feature?.properties?.[predictionProfileLabelKey] ?? "").trim()).filter(Boolean))];
+    }
   }
-  const summaryProfiles = Array.isArray(datasetStore.prediction?.summary?.profile_summaries)
-    ? datasetStore.prediction.summary.profile_summaries
-    : [];
-  const labels = summaryProfiles
-    .map((item) => String(item?.label ?? "").trim())
-    .filter(Boolean);
-  if (!labels.length) {
-    const featureLabels = (datasetStore.prediction?.geojson?.features ?? [])
-      .map((feature) => String(feature?.properties?.[predictionProfileLabelKey] ?? "").trim())
-      .filter(Boolean);
-    featureLabels.forEach((label) => {
-      if (!labels.includes(label)) {
-        labels.push(label);
-      }
-    });
-  }
-  return new Map(
-    labels.map((label, index) => [label, multiProfilePalette[index % multiProfilePalette.length]]),
-  );
+  const colors = new Map(labels.map((label, index) => [label, getPredictionProfilePaletteColor(index)]));
+  getPredictionProfileColorMap.cache = { inputs, colors };
+  return colors;
 };
 
 const getPredictionProfileColor = (label) => {
@@ -1937,6 +1927,19 @@ const renderTopGermplasmPreview = () => {
 };
 
 function syncSummaryTabsForActiveView() {
+  const showStatistics = activeDataViewTab === "prediction" &&
+    datasetStore.prediction?.summary?.climate_scope === "regional_manual";
+  if (summaryTabStatisticsButton) {
+    summaryTabStatisticsButton.hidden = !showStatistics;
+  }
+  if (!showStatistics) {
+    predictionStatisticsResizeObserver?.disconnect();
+    predictionStatisticsRenderCache = null;
+    predictionStatisticsContainer?.replaceChildren();
+    if (activeSummaryTab === "statistics") {
+      setActiveSummaryTab("countries");
+    }
+  }
   if (summaryTabCountriesButton) {
     summaryTabCountriesButton.hidden = false;
   }
@@ -7256,6 +7259,10 @@ const hideTooltip = () => {
 
 const setActiveSummaryTab = (tab) => {
   activeSummaryTab = tab;
+  summaryTabStatisticsButton?.classList.toggle("active", tab === "statistics");
+  if (summaryPanelStatistics) {
+    summaryPanelStatistics.hidden = tab !== "statistics";
+  }
   summaryTabCountriesButton.classList.toggle("active", tab === "countries");
   summaryTabStatsButton.classList.toggle("active", tab === "stats");
   if (summaryTabLogButton) {
@@ -7358,7 +7365,9 @@ const renderCountrySummary = (features = loadedFeatures) => {
 const resetDetails = () => {
   activeDetailsTab = "germplasm";
   setActiveDetailsTab("germplasm");
-  setActiveSummaryTab("countries");
+  if (!isManualGridPredictionResult()) {
+    setActiveSummaryTab("countries");
+  }
   detailsMeta.innerHTML = "";
   detailsList.innerHTML = "";
   germplasmList.innerHTML = "";
@@ -8594,6 +8603,113 @@ const hasManualGridCompetitionFeatures = () =>
   Array.isArray(datasetStore.prediction?.rawGeojson?.features) &&
   datasetStore.prediction.rawGeojson.features.length > 0;
 
+const renderPredictionStatistics = (featureLookup, numericLookup = null) => {
+  if (!predictionStatisticsContainer || !isManualGridPredictionResult()) {
+    return;
+  }
+  const summary = datasetStore.prediction.summary;
+  const sourceFeatures = datasetStore.prediction.rawGeojson?.features ?? datasetStore.prediction.geojson?.features ?? [];
+  const criterion = getPredictionSelectedIdHeader();
+  const target = getPredictedTargetColumnLabel();
+  const previous = predictionStatisticsRenderCache;
+  if (previous?.featureLookup === featureLookup && previous.numericLookup === numericLookup &&
+      previous.sourceFeatures === sourceFeatures && previous.summary === summary &&
+      previous.criterion === criterion && previous.target === target) {
+    return;
+  }
+  predictionStatisticsRenderCache = { featureLookup, numericLookup, sourceFeatures, summary, criterion, target };
+  const colorMap = getPredictionProfileColorMap();
+  const names = getPredictionDistinctGermplasmNames().sort((a, b) => b.length - a.length);
+  const describe = (label, feature = null) => {
+    const name = String(feature?.properties?.Name ?? names.find(name => label === name || label.startsWith(`${name} - `)) ?? label);
+    const criterionValue = criterion
+      ? getPredictionSelectedIdValueForProperties(feature?.properties) || (label.startsWith(`${name} - `) ? label.slice(name.length + 3) : "")
+      : "";
+    const color = colorMap.get(label) ?? "#2e7d32";
+    return { label, name, criterionValue, color,
+      colorName: numericLookup ? "Prediction scale" : getPredictionProfileColorName(color) };
+  };
+  const candidates = new Map();
+  for (const feature of sourceFeatures) {
+    const label = numericLookup
+      ? getPredictionNameAndIdLabelForFeature(feature)
+      : getPredictionCategoryLabelForFeature(feature);
+    if (label && !candidates.has(label)) {
+      candidates.set(label, describe(label, feature));
+    }
+  }
+  if (!hasManualGridCompetitionFeatures()) {
+    for (const profile of getAvailablePredictionProfileSummaries()) {
+      if (!candidates.has(profile.label)) {
+        candidates.set(profile.label, describe(profile.label));
+      }
+    }
+  }
+  const winners = [];
+  for (const [cellId, feature] of featureLookup) {
+    const label = numericLookup
+      ? getPredictionNameAndIdLabelForFeature(feature)
+      : getPredictionCategoryLabelForFeature(feature);
+    winners.push({ ...describe(label, feature),
+      value: numericLookup ? numericLookup.get(cellId) : asFloat(getPredictedTargetValue(feature.properties)) });
+  }
+  const result = buildPredictionStatistics(
+    Array.from(candidates.values()).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" })),
+    winners,
+  );
+  const number = (value, decimals = 6) => Number.isFinite(value)
+    ? value.toLocaleString("en-US", { maximumFractionDigits: decimals }) : "—";
+  const cells = (row) => `<td>${number(row.cells, 0)}</td><td>${number(row.percentage, 2)}%</td><td>${number(row.areaKm2, 0)}</td>`;
+  const statistics = (row) => ["mean", "min", "max", "q1", "median", "q3"]
+    .map(key => `<td>${number(row.statistics[key])}</td>`).join("");
+  const rows = result.rows.map(row => `<tr>
+    <th scope="row">${escapeHtml(row.name)}</th><td>${escapeHtml(row.criterionValue || "—")}</td>
+    <td><span class="prediction-statistics-color">${numericLookup ? "" : `<span class="prediction-statistics-swatch" style="background:${row.color}" aria-hidden="true"></span>`}${escapeHtml(row.colorName)}</span></td>
+    ${cells(row)}${statistics(row)}</tr>`).join("");
+  const columns = predictionStatisticsColumns(criterion);
+  predictionStatisticsResizeObserver?.disconnect();
+  predictionStatisticsContainer.innerHTML = `<div class="prediction-statistics-heading">
+      <h3 id="prediction-statistics-title">Winning results per cell · ${escapeHtml(target)}</h3>
+      <button class="upload-button prediction-statistics-download" type="button" aria-label="Download CSV" title="Download CSV">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v5h14v-5"/></svg>
+      </button></div>
+    <div class="prediction-statistics-table-wrap" role="region" aria-label="Winning prediction statistics" tabindex="0">
+    <table class="prediction-statistics-table" aria-labelledby="prediction-statistics-title">
+      <thead><tr>${columns.map(title => `<th scope="col">${escapeHtml(title)}</th>`).join("")}</tr></thead>
+      <tbody>${rows}</tbody><tfoot><tr><th scope="row">Total</th><td></td><td></td>${cells(result.total)}${statistics(result.total)}</tr></tfoot>
+    </table></div>
+    <p class="prediction-statistics-note">Equivalent area: cells won × 25 km² (5 × 5 km per cell). Statistics use the winning values from the current selection, matching the exported report. Q1 and Q3 correspond to the 25th and 75th percentiles.</p>`;
+  const table = predictionStatisticsContainer.querySelector("table");
+  const wrapper = table.parentElement;
+  const sizeVisibleRows = () => {
+    if (!table.offsetHeight) return;
+    const bodyHeight = Array.from(table.tBodies[0].rows).slice(0, 5)
+      .reduce((height, row) => height + row.getBoundingClientRect().height, 0);
+    // Include the horizontal scrollbar so exactly five body rows remain visible.
+    const scrollbarHeight = wrapper.offsetHeight - wrapper.clientHeight - 2;
+    wrapper.style.maxHeight = `${Math.ceil(table.tHead.getBoundingClientRect().height +
+      bodyHeight + table.tFoot.getBoundingClientRect().height + scrollbarHeight + 2)}px`;
+  };
+  predictionStatisticsResizeObserver = new ResizeObserver(sizeVisibleRows);
+  predictionStatisticsResizeObserver.observe(table);
+  sizeVisibleRows();
+  const downloadButton = predictionStatisticsContainer.querySelector(".prediction-statistics-download");
+  downloadButton.addEventListener("click", async () => {
+    downloadButton.disabled = true;
+    const objectUrl = URL.createObjectURL(new Blob([predictionStatisticsCsv(result, criterion)], { type: "text/csv;charset=utf-8" }));
+    try {
+      await triggerBrowserDownload(objectUrl, {
+        suggestedFilename: "winning_results_per_cell.csv",
+        promptForFilename: false,
+        bypassDownloadGate: true,
+      });
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+      downloadButton.disabled = false;
+    }
+  });
+};
+
 const syncManualGridSelectedFeature = (featureLookup) => {
   const gridCellId = String(selectedFeature?.properties?.["Forecast grid cell id"] ?? "").trim();
   if (!gridCellId) {
@@ -8697,6 +8813,7 @@ const renderManualGridOverlay = (transform) => {
     }
     syncManualGridSelectedFeature(featureLookup);
   }
+  renderPredictionStatistics(featureLookup, multiProfileMode ? null : predictedLookup);
   const hasMultiProfileValues = multiProfileMode
     ? (
         useCheckedLabels && profileHeatSamples !== null
@@ -9301,7 +9418,7 @@ const applyFeatureCollection = async (
     createStat("Max Longitude", formatCoordinate(d3.max(longitudes))),
   );
 
-  setActiveSummaryTab("countries");
+  setActiveSummaryTab(isManualGridPredictionResult() ? "statistics" : "countries");
   setActiveDetailsTab("germplasm");
   renderCountrySummary(points);
   renderSummaryLog(getActiveDatasetSummary());
@@ -10353,6 +10470,12 @@ nextPageButton.addEventListener("click", () => {
   }
   currentPage += 1;
   renderDetails();
+});
+
+summaryTabStatisticsButton?.addEventListener("click", () => {
+  if (workflowInteractive && isManualGridPredictionResult()) {
+    setActiveSummaryTab("statistics");
+  }
 });
 
 summaryTabCountriesButton.addEventListener("click", () => {
