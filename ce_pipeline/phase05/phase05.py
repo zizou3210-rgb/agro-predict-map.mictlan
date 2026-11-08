@@ -19,7 +19,7 @@ from typing import Callable
 
 import pandas as pd
 from tabular_io import read_dataframe
-from pipeline.progress import work_progress
+from pipeline.progress import work_progress, write_json_atomic
 
 from ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
 from pipeline.common import GEO_COLUMNS, GERMPLASM_COLUMNS, dataframe_to_geojson
@@ -68,8 +68,7 @@ def write_progress(
     }
     if details:
         payload["details"] = details
-    progress_file.parent.mkdir(parents=True, exist_ok=True)
-    progress_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(progress_file, payload, indent=2)
 
 
 def ensure_country_column(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:

@@ -147,6 +147,7 @@ jobs:
           python -m unittest discover -s tests -p test_climate_prefetch_progress.py -v
           python -m unittest discover -s tests -p test_climate_downloads.py -v
           python -m unittest discover -s tests -p test_server_pipeline_status.py -v
+          python -m unittest discover -s tests -p test_atomic_progress.py -v
 
       - name: FeatureHero training tests (temporarily skipped)
         if: ${{ false }}

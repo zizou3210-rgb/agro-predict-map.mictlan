@@ -235,7 +235,7 @@ def _write_pipeline_progress_status(run_dir: Path, *, status: str, message: str)
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     })
     with contextlib.suppress(OSError):
-        progress_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_file_atomic(progress_file, payload)
         PIPELINE_PROGRESS_CACHE[str(progress_file.resolve())] = dict(payload)
 
 
@@ -644,14 +644,8 @@ def sanitize_json_payload(value: object) -> object:
 
 
 def write_json_file_atomic(target_path: Path, payload: object) -> None:
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target_path.with_suffix(target_path.suffix + ".tmp")
-    sanitized_payload = sanitize_json_payload(payload)
-    temp_path.write_text(
-        json.dumps(sanitized_payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    temp_path.replace(target_path)
+    from pipeline.progress import write_json_atomic
+    write_json_atomic(target_path, sanitize_json_payload(payload), indent=2, allow_nan=False)
 
 
 def read_json_file_safe(target_path: Path) -> dict[str, object]:
@@ -2693,7 +2687,7 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             "message": f"Receiving {source_name} and preparing the backend job.",
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
-        progress_file.write_text(json.dumps(initial_progress, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_file_atomic(progress_file, initial_progress)
         process, stdout_handle, stderr_handle = self.launch_pipeline_process(
             run_dir=run_dir,
             source_name=source_name,

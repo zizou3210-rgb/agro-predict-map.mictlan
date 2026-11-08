@@ -3285,17 +3285,10 @@ def write_progress(
     }
     if details:
         payload["details"] = details
-    progress_file.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=progress_file.parent, delete=False) as temporary:
-        temporary.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-        temporary_path = Path(temporary.name)
-    try:
-        os.replace(temporary_path, progress_file)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    write_json_atomic(progress_file, payload, indent=2)
 
 
-from pipeline.progress import work_progress, reported_operation
+from pipeline.progress import work_progress, reported_operation, write_json_atomic
 
 
 def publish_phase03_progress(progress_file, progress_callback, percent, stage, message, details=None):
