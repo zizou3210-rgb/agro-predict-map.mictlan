@@ -37,4 +37,10 @@ python3 -m unittest discover -s tests -p test_installer_packaging.py -v
 
 Para incluir la prueba real de imports de una copia completa empaquetada, configurar `APP_INSTALLER_TEST_PYTHON` con la ruta de un Python 3.12 que tenga instalado FeatureHero y sus dependencias. CI ejecuta esa prueba en sus tres plataformas después de archivar el intérprete base, evitando incorporar al archivo de runtime las dependencias instaladas solamente para las pruebas.
 
-La validación de CI incluye un entrenamiento XGBoost pequeño en segundo plano y comprueba que se produzcan el modelo, las variables seleccionadas y la tabla de entrenamiento. También verifica que un entrenamiento fallido muestre su excepción original y que un fallo de gráficas no impida guardar un modelo válido. La salida estándar y los errores del proceso se conservan en el log de FeatureHero y el error de CE incorpora su contenido cuando faltan artefactos.
+La suite de pruebas incluye un entrenamiento XGBoost pequeño en segundo plano y comprueba que se produzcan el modelo, las variables seleccionadas y la tabla de entrenamiento. También verifica que un entrenamiento fallido muestre su excepción original y que un fallo de gráficas no impida guardar un modelo válido. La salida estándar y los errores del proceso se conservan en el log de FeatureHero y el error de CE incorpora su contenido cuando faltan artefactos.
+
+La prueba de entrenamiento utiliza 32 filas y `FEATUREHERO_N_JOBS=1` para limitar la competencia entre hilos en los runners de CI. Conserva el mínimo válido de 10 generaciones y 10 individuos y un límite de inactividad de 120 segundos. El uso normal mantiene `FEATUREHERO_N_JOBS=-1` si no se configura otra cantidad de hilos.
+
+Al vencer el tiempo de entrenamiento o interrumpirse el seguimiento, la app termina el proceso de FeatureHero y sus descendientes, espera su salida y fuerza la terminación de los que no respondan. Así se liberan los handles de los logs antes de propagar el error o limpiar los temporales, incluido Windows.
+
+El workflow se activa con cualquier push a cualquier rama (`branches: ["**"]`), sin filtros de archivos. Por solicitud del usuario, el paso de pruebas de entrenamiento de FeatureHero está temporalmente omitido con `if: ${{ false }}`. Continúan activas las validaciones de dependencias, empaquetado e inicio de las fases CE en las tres plataformas.

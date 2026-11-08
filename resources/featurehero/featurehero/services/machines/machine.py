@@ -1,6 +1,7 @@
 """To run machine to prediction"""
 
 import random
+import os
 import time
 import json
 from abc import ABC, abstractmethod
@@ -23,6 +24,14 @@ from featurehero.services.machines.machine_enums import (
     LimitHyperParameter,
     HyperParameterRebuild,
 )
+
+
+def runtime_n_jobs() -> int:
+    """Allow bounded CPU use without changing the training search space."""
+    value = int(os.environ.get("FEATUREHERO_N_JOBS", "-1"))
+    if value == 0 or value < -1:
+        raise ValueError("FEATUREHERO_N_JOBS must be -1 or a positive integer.")
+    return value
 
 
 class HyperParametersDefinition:
@@ -412,12 +421,12 @@ class RandomForestRegression(MachineRegression):
             min_impurity_decrease=self._hyper_parameters[
                 "min_impurity_decrease"].value,
             criterion=self._criterion(),
-            n_jobs=-1,
+            n_jobs=runtime_n_jobs(),
         )
 
     def build_machine_default(self):
         self._machine = RandomForestRegressor(
-            n_jobs=-1,
+            n_jobs=runtime_n_jobs(),
             n_estimators=self._hyper_parameters["n_estimators"].value,
             criterion=self._criterion(),
         )
@@ -602,12 +611,12 @@ class ExtremeGradientBoostRegression(MachineRegression):
             learning_rate=self._hyper_parameters["learning_rate"].value,
             reg_lambda=self._hyper_parameters["lambda"].value,
             **self._objective_arguments(),
-            n_jobs=-1,
+            n_jobs=runtime_n_jobs(),
         )
 
     def build_machine_default(self):
         self._machine = XGBRegressor(
             n_estimators=self._hyper_parameters["n_estimators"].value,
             **self._objective_arguments(),
-            n_jobs=-1,
+            n_jobs=runtime_n_jobs(),
         )

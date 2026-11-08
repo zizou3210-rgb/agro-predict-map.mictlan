@@ -82,6 +82,7 @@ REQUIRED_APP_FILES = (
     "installers/desktop_installer.py", "installers/launch_mictlan_agrixgboost.py",
     "resources/featurehero/pyproject.toml", "resources/featurehero/featurehero/main.py",
     "resources/featurehero/featurehero/worker/pip_worker.py",
+    "resources/featurehero/featurehero/services/machines/machine.py",
     "resources/featurehero/featurehero/services/optimizations/optimization_genetic_algorithm.py",
     "pipeline/phase_analysis.py",
     "pipeline/run_pipeline.py", "pipeline/model/grain_yield_model.py",

@@ -86,6 +86,36 @@ def is_pid_running(pid: int) -> bool:
         return True
 
 
+def terminate_featurehero_job(pid: int, timeout_seconds: float = 5.0) -> None:
+    """Stop this job and its descendants, waiting for file handles to close."""
+    try:
+        parent = psutil.Process(pid)
+        processes = parent.children(recursive=True) + [parent]
+    except psutil.NoSuchProcess:
+        return
+    for process in processes:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(processes, timeout=timeout_seconds)
+    remaining = []
+    for process in alive:
+        try:
+            if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                process.kill()
+                remaining.append(process)
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(remaining, timeout=timeout_seconds)
+    for process in alive:
+        try:
+            if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                raise RuntimeError(f"FeatureHero job {process.pid} could not be stopped.")
+        except psutil.NoSuchProcess:
+            pass
+
+
 def wait_for_pid(pid: int, timeout_seconds: float | None = None) -> None:
     if timeout_seconds is None:
         timeout_seconds = float(get_featurehero_job_timeout_seconds())
@@ -538,54 +568,61 @@ def launch_featurehero(
     log_file = Path(log_path_value).expanduser() if log_path_value else None
     timeout_seconds = float(get_featurehero_job_timeout_seconds())
 
-    started_at = time.time()
+    started_at = time.monotonic()
     last_progress_snapshot: tuple[int, int] | None = None
     last_log_snapshot = ""
     last_message = ""
-    while True:
-        if not is_pid_running(pid):
-            break
+    try:
+        while True:
+            if not is_pid_running(pid):
+                break
 
-        progress = read_status_progress(status_file)
-        if progress is not None and progress != last_progress_snapshot:
-            started_at = time.time()
-            last_progress_snapshot = progress
-        last_log_line = (
-            read_last_non_progress_log_line(log_file)
-            if progress is not None
-            else read_last_log_line(log_file)
-        )
-        if last_log_line and last_log_line != last_log_snapshot:
-            started_at = time.time()
-            last_log_snapshot = last_log_line
-
-        if progress_callback:
-            if progress is not None:
-                current_step, total_steps = progress
-                training_stage_percent = round((current_step / total_steps) * 100)
-                phase_percent = training_stage_percent
-                message = (
-                    f"FeatureHero training progress {training_stage_percent}% ({current_step}/{total_steps})."
-                    + (f" Last update: {last_log_line}" if last_log_line else "")
-                )
-            else:
-                phase_percent = 0
-                message = (
-                    f"FeatureHero is training the model for {target_column}."
-                    + (f" Last update: {last_log_line}" if last_log_line else "")
-                )
-            if message != last_message:
-                progress_callback(phase_percent, "Running model analysis", message)
-                last_message = message
-
-        if time.time() - started_at > timeout_seconds:
-            raise TimeoutError(
-                "Timed out while waiting for FeatureHero job "
-                f"{pid}. Last progress: {progress[0]}/{progress[1]}."
+            progress = read_status_progress(status_file)
+            if progress is not None and progress != last_progress_snapshot:
+                started_at = time.monotonic()
+                last_progress_snapshot = progress
+            last_log_line = (
+                read_last_non_progress_log_line(log_file)
                 if progress is not None
-                else f"Timed out while waiting for FeatureHero job {pid}."
+                else read_last_log_line(log_file)
             )
-        time.sleep(5.0)
+            if last_log_line and last_log_line != last_log_snapshot:
+                started_at = time.monotonic()
+                last_log_snapshot = last_log_line
+
+            if progress_callback:
+                if progress is not None:
+                    current_step, total_steps = progress
+                    training_stage_percent = round((current_step / total_steps) * 100)
+                    phase_percent = training_stage_percent
+                    message = (
+                        f"FeatureHero training progress {training_stage_percent}% ({current_step}/{total_steps})."
+                        + (f" Last update: {last_log_line}" if last_log_line else "")
+                    )
+                else:
+                    phase_percent = 0
+                    message = (
+                        f"FeatureHero is training the model for {target_column}."
+                        + (f" Last update: {last_log_line}" if last_log_line else "")
+                    )
+                if message != last_message:
+                    progress_callback(phase_percent, "Running model analysis", message)
+                    last_message = message
+
+            if time.monotonic() - started_at > timeout_seconds:
+                raise TimeoutError(
+                    "Timed out while waiting for FeatureHero job "
+                    f"{pid}. Last progress: {progress[0]}/{progress[1]}."
+                    if progress is not None
+                    else f"Timed out while waiting for FeatureHero job {pid}."
+                )
+            time.sleep(5.0)
+    except BaseException as error:
+        try:
+            terminate_featurehero_job(pid)
+        except Exception as cleanup_error:
+            error.add_note(f"FeatureHero cleanup failed: {cleanup_error}")
+        raise
     try:
         workspace_dir = resolve_workspace_dir(target_dir, before_workspace_dirs)
     except FileNotFoundError:
