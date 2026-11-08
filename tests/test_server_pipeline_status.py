@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,20 +105,28 @@ class PipelineStatusTest(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "Orphan discovery uses POSIX ps; Windows cancels tracked jobs")
     def test_orphan_cancellation_marks_its_run_and_ignores_non_python_commands(self):
         with tempfile.TemporaryDirectory() as directory:
-            run_dir = Path(directory) / "job"
+            root = Path(directory)
+            alias = root / "alias"
+            alias.symlink_to(root, target_is_directory=True)
             pipeline = str((server.APP_DIR / "pipeline" / "run_pipeline.py").resolve())
-            listing = Mock(stdout=f"99999991 /usr/bin/python {pipeline} --run-dir {run_dir}\n99999992 echo {pipeline}\n")
-            with patch.object(server, "PIPELINE_RUNS_DIR", Path(directory)), patch.dict(
-                server.PIPELINE_JOBS, {}, clear=True,
-            ), patch.object(server, "reap_finished_pipeline_jobs"), patch.object(
-                server.subprocess, "run", return_value=listing,
-            ), patch.object(server, "terminate_pid", return_value=True) as kill, patch.object(
-                server, "_write_pipeline_progress_status",
-            ) as mark:
-                self.assertEqual(server.terminate_existing_pipeline_processes(), 1)
-                kill.assert_called_once_with(99999991)
-                self.assertEqual(mark.call_args.kwargs["status"], "cancelled")
-                self.assertEqual(mark.call_args.args[0], run_dir)
+            # macOS temporary paths may use /var, which resolves to /private/var.
+            # Exercise an alias on every POSIX runner, including Linux.
+            for runs_dir in (root, alias):
+                with self.subTest(runs_dir=runs_dir):
+                    run_dir = runs_dir / "job"
+                    command = shlex.join(["/usr/bin/python", pipeline, "--run-dir", str(run_dir)])
+                    listing = Mock(stdout=f"99999991 {command}\n99999992 echo {shlex.quote(pipeline)}\n")
+                    with patch.object(server, "PIPELINE_RUNS_DIR", runs_dir), patch.dict(
+                        server.PIPELINE_JOBS, {}, clear=True,
+                    ), patch.object(server, "reap_finished_pipeline_jobs"), patch.object(
+                        server.subprocess, "run", return_value=listing,
+                    ), patch.object(server, "terminate_pid", return_value=True) as kill, patch.object(
+                        server, "_write_pipeline_progress_status",
+                    ) as mark:
+                        self.assertEqual(server.terminate_existing_pipeline_processes(), 1)
+                        kill.assert_called_once_with(99999991)
+                        self.assertEqual(mark.call_args.kwargs["status"], "cancelled")
+                        self.assertEqual(mark.call_args.args[0], run_dir.resolve())
 
     def test_cancelled_recovered_job_does_not_try_to_build_completed_result(self):
         handler = object.__new__(AppRequestHandler)
