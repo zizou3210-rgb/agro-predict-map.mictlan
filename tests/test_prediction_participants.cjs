@@ -14,7 +14,7 @@ const helpers = new Function('datasetStore', 'loadedFeatures', `
   const currentRenderedFlowMode = 'saved_model';
   const getPredictionSelectedIdHeader = () => '';
   const isCategoricalPredictionColorMode = () => isMultiGermplasmPredictionResult();
-  const multiProfilePalette = ['red', 'blue', 'green'];
+  const getPredictionProfilePaletteColor = index => ['red', 'blue', 'green'][index];
   ${extract('getPredictionDistinctGermplasmNames')}
   const isMultiGermplasmPredictionResult = () => getPredictionDistinctGermplasmNames().length > 1;
   ${extract('getAvailablePredictionProfileSummaries')}

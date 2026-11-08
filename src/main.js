@@ -11,6 +11,7 @@ import { renderSelectColumnm } from "./selectColumnm.js";
 import { renderSelectColumnClassifier } from "./selectColumnClassifier.js";
 import { renderSelectionSummary } from "./summary.js";
 import { buildPredictionStatistics, predictionStatisticsColumns, predictionStatisticsCsv } from "./predictionStatistics.js";
+import { multiProfilePalette, getPredictionProfilePaletteColor, getPredictionProfileColorName } from "./predictionColors.js";
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
@@ -74,18 +75,6 @@ const countryPalette = [
   "#c7d7d3",
   "#d7d1c8",
   "#cad2c0",
-];
-const multiProfilePalette = [
-  "#2e7d32",
-  "#d35400",
-  "#7b1fa2",
-  "#1565c0",
-  "#c62828",
-  "#6d4c41",
-  "#fbc02d",
-  "#00838f",
-  "#ad1457",
-  "#455a64",
 ];
 
 const svg = d3.select("#map");
@@ -1790,49 +1779,38 @@ const mergePredictionCategoryLabels = (...labelGroups) => {
 };
 
 const getPredictionProfileColorMap = () => {
-  if (isCategoricalPredictionColorMode() && getPredictionSelectedIdHeader()) {
-    const featureLabels = Array.from(
-      new Set(
-        (loadedFeatures.length
-          ? loadedFeatures
-          : Array.isArray(datasetStore.prediction?.geojson?.features)
-            ? datasetStore.prediction.geojson.features
-            : []
-        )
-          .map((feature) => getPredictionCategoryLabelForFeature(feature))
-          .filter(Boolean),
-      ),
-    ).sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base", numeric: true }));
-    const labels = mergePredictionCategoryLabels(featureLabels, getSelectedPredictionNameIdLabels());
-    return new Map(
-      labels.map((label, index) => [label, multiProfilePalette[index % multiProfilePalette.length]]),
-    );
+  const categorical = isCategoricalPredictionColorMode();
+  const selectedId = getPredictionSelectedIdHeader();
+  const prediction = datasetStore.prediction;
+  const selectedLabels = categorical && selectedId ? getSelectedPredictionNameIdLabels() : [];
+  const inputs = [categorical, selectedId, loadedFeatures, prediction?.rawGeojson?.features,
+    prediction?.geojson?.features, prediction?.summary, JSON.stringify(selectedLabels)];
+  const cached = getPredictionProfileColorMap.cache;
+  if (cached && inputs.every((input, index) => input === cached.inputs[index])) {
+    return cached.colors;
   }
-  if (isMultiGermplasmPredictionResult()) {
-    const labels = getPredictionDistinctGermplasmNames();
-    return new Map(
-      labels.map((label, index) => [label, multiProfilePalette[index % multiProfilePalette.length]]),
-    );
+  const summaryProfiles = Array.isArray(prediction?.summary?.profile_summaries)
+    ? prediction.summary.profile_summaries : [];
+  let labels;
+  if (categorical && selectedId) {
+    // Include every competitor, even when it wins no cells or is unchecked.
+    const featureLabels = [prediction?.rawGeojson?.features ?? [],
+      prediction?.geojson?.features ?? [], loadedFeatures]
+      .flatMap(features => features.map(getPredictionCategoryLabelForFeature));
+    labels = mergePredictionCategoryLabels(featureLabels, selectedLabels,
+      summaryProfiles.map(profile => profile?.label));
+  } else if (isMultiGermplasmPredictionResult()) {
+    labels = getPredictionDistinctGermplasmNames();
+  } else {
+    labels = [...new Set(summaryProfiles.map(profile => String(profile?.label ?? "").trim()).filter(Boolean))];
+    if (!labels.length) {
+      labels = [...new Set((prediction?.rawGeojson?.features ?? prediction?.geojson?.features ?? [])
+        .map(feature => String(feature?.properties?.[predictionProfileLabelKey] ?? "").trim()).filter(Boolean))];
+    }
   }
-  const summaryProfiles = Array.isArray(datasetStore.prediction?.summary?.profile_summaries)
-    ? datasetStore.prediction.summary.profile_summaries
-    : [];
-  const labels = summaryProfiles
-    .map((item) => String(item?.label ?? "").trim())
-    .filter(Boolean);
-  if (!labels.length) {
-    const featureLabels = (datasetStore.prediction?.geojson?.features ?? [])
-      .map((feature) => String(feature?.properties?.[predictionProfileLabelKey] ?? "").trim())
-      .filter(Boolean);
-    featureLabels.forEach((label) => {
-      if (!labels.includes(label)) {
-        labels.push(label);
-      }
-    });
-  }
-  return new Map(
-    labels.map((label, index) => [label, multiProfilePalette[index % multiProfilePalette.length]]),
-  );
+  const colors = new Map(labels.map((label, index) => [label, getPredictionProfilePaletteColor(index)]));
+  getPredictionProfileColorMap.cache = { inputs, colors };
+  return colors;
 };
 
 const getPredictionProfileColor = (label) => {
@@ -8641,12 +8619,6 @@ const renderPredictionStatistics = (featureLookup, numericLookup = null) => {
   }
   predictionStatisticsRenderCache = { featureLookup, numericLookup, sourceFeatures, summary, criterion, target };
   const colorMap = getPredictionProfileColorMap();
-  const colorNames = new Map([
-    ["#2e7d32", "Green"], ["#d35400", "Orange"], ["#7b1fa2", "Purple"],
-    ["#1565c0", "Blue"], ["#c62828", "Red"], ["#6d4c41", "Brown"],
-    ["#fbc02d", "Yellow"], ["#00838f", "Turquoise"], ["#ad1457", "Pink"],
-    ["#455a64", "Blue grey"],
-  ]);
   const names = getPredictionDistinctGermplasmNames().sort((a, b) => b.length - a.length);
   const describe = (label, feature = null) => {
     const name = String(feature?.properties?.Name ?? names.find(name => label === name || label.startsWith(`${name} - `)) ?? label);
@@ -8655,7 +8627,7 @@ const renderPredictionStatistics = (featureLookup, numericLookup = null) => {
       : "";
     const color = colorMap.get(label) ?? "#2e7d32";
     return { label, name, criterionValue, color,
-      colorName: numericLookup ? "Prediction scale" : colorNames.get(color) ?? color };
+      colorName: numericLookup ? "Prediction scale" : getPredictionProfileColorName(color) };
   };
   const candidates = new Map();
   for (const feature of sourceFeatures) {

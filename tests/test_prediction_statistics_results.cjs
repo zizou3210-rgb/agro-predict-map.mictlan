@@ -86,6 +86,7 @@ const path = require('node:path');
     hasManualGridCompetitionFeatures:()=>true,
     getPredictedTargetValue:properties=>properties[fixture.target],
     asFloat:Number,buildPredictionStatistics,predictionStatisticsCsv,
+    getPredictionProfileColorName:color=>palette.find(entry=>entry[0]===color)?.[1] ?? color,
     predictionStatisticsColumns,
     escapeHtml:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;'),
     ResizeObserver:class {observe() {} disconnect() {}},
