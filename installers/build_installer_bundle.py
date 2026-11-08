@@ -9,6 +9,7 @@ from desktop_installer import (
     REQUIRED_APP_ENTRIES,
     copy_entry,
     resolve_latest_pipeline_model_dir,
+    validate_required_app_entries,
 )
 
 
@@ -19,6 +20,7 @@ BUNDLE_DIR = DIST_DIR / "Mictlan-AgriXGBoost-installer"
 
 
 def main() -> None:
+    validate_required_app_entries(APP_DIR)
     if BUNDLE_DIR.exists():
         shutil.rmtree(BUNDLE_DIR)
     BUNDLE_DIR.mkdir(parents=True, exist_ok=True)

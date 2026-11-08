@@ -21,6 +21,8 @@ on:
       - 'resources/featurehero/**'
       - 'server.py'
       - 'config_env.py'
+      - 'shared_cache.py'
+      - 'tabular_io.py'
       - 'pipeline/**'
       - 'preprocess/**'
       - 'ce_pipeline/**'
@@ -32,6 +34,7 @@ on:
       - 'service-worker.js'
       - 'workbook_preview.py'
       - 'package.json'
+      - 'tests/test_installer_packaging.py'
       - '.gitignore'
 
 permissions:
@@ -158,6 +161,12 @@ jobs:
           path: installers/runtime-archives/runtime-${{ matrix.platform }}.tar.gz
           if-no-files-found: error
 
+      # Validate after archiving so test dependencies do not inflate the base runtime.
+      - name: Validate application dependencies and packaged imports
+        run: |
+          python -m pip install ./resources/featurehero
+          python -c "import os, sys, unittest; os.environ['APP_INSTALLER_TEST_PYTHON'] = sys.executable; suite = unittest.defaultTestLoader.discover('tests', pattern='test_installer_packaging.py'); result = unittest.TextTestRunner(verbosity=2).run(suite); sys.exit(0 if result.wasSuccessful() else 1)"
+
   assemble-installers:
     name: Assemble native installer packages
     runs-on: ubuntu-latest
@@ -217,6 +226,9 @@ jobs:
             mkdir -p "$target"
             tar -xzf "$archive" -C "$target"
           done
+
+      - name: Test installer packaging
+        run: python3 -m unittest discover -s tests -p test_installer_packaging.py
 
       - name: Build native installer archives
         shell: bash

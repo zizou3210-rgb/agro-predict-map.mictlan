@@ -91,7 +91,11 @@ CE_PHASE06_SCRIPT = CE_PIPELINE_DIR / "phase06" / "phase06.py"
 TOP_GERMPLASM_ENABLED = False
 APP_RUNTIME_NAME = "MictlanAgriXGBoost"
 FEATUREHERO_DIR = APP_DIR / "resources" / "featurehero"
-PIPELINE_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL", "rasterio")
+PIPELINE_RUNTIME_MODULES = (
+    "featurehero", "pandas", "numpy", "openpyxl", "certifi", "PIL", "rasterio",
+    "psutil", "pykrige", "sklearn", "xgboost", "matplotlib", "seaborn",
+    "numbers_parser", "scipy", "joblib",
+)
 
 def get_preferred_pipeline_pythons() -> list[Path | None]:
     featurehero_venv = APP_DIR / "resources" / "featurehero" / ".venv"

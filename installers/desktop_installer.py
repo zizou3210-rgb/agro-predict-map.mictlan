@@ -38,16 +38,27 @@ WINDOWS_PRESERVED_PATHS = {
     Path("python-runtime"),
     Path("resources") / "featurehero" / ".venv",
 }
-FEATUREHERO_RUNTIME_MODULES = ("featurehero", "openpyxl", "certifi", "PIL", "rasterio")
+FEATUREHERO_RUNTIME_MODULES = (
+    "featurehero", "pandas", "numpy", "openpyxl", "certifi", "PIL", "rasterio",
+    "psutil", "pykrige", "sklearn", "xgboost", "matplotlib", "seaborn",
+    "numbers_parser", "scipy", "joblib",
+)
+APP_IMPORT_CHECK_MODULES = (
+    "tabular_io", "workbook_preview", "server", "pipeline.run_pipeline",
+    "preprocess.runner", "ce_pipeline.training", "ce_pipeline.prediction.prediction",
+    "featurehero.main",
+)
 REQUIRED_APP_ENTRIES = [
     "__init__.py",
     "config_env.py",
     "index.html",
     "manifest.webmanifest",
+    "package.json",
     "server.py",
     "shared_cache.py",
     "service-worker.js",
     "styles.css",
+    "tabular_io.py",
     "workbook_preview.py",
     "ce_pipeline",
     "data",
@@ -60,10 +71,25 @@ REQUIRED_APP_ENTRIES = [
     "src",
     "template",
 ]
+# Required contents inside the recursively copied directories.
+REQUIRED_APP_FILES = (
+    "installers/desktop_installer.py", "installers/launch_mictlan_agrixgboost.py",
+    "resources/featurehero/pyproject.toml", "resources/featurehero/featurehero/main.py",
+    "pipeline/run_pipeline.py", "pipeline/model/grain_yield_model.py",
+    "pipeline/model/runtime_predict.py", "preprocess/runner.py", "preprocess/phase1_schema.py",
+    "ce_pipeline/training.py", "ce_pipeline/prediction/prediction.py",
+    "ce_pipeline/phase01/phase1.py", "ce_pipeline/phase02/phase02.py",
+    "ce_pipeline/phase03/script03.py", "ce_pipeline/phase04/phase04.py",
+    "ce_pipeline/phase05/phase05.py", "ce_pipeline/phase06/phase06.py",
+    "data/world.geojson", "data/countries-110m.json",
+    "template/canonical_template_superset_88.csv",
+    "src/main.js", "src/launcher.js", "src/predictionStatistics.js", "src/predictionColors.js",
+    "src/selectColumnm.js", "src/selectColumnClassifier.js", "src/summary.js",
+    "selecctionProperties/flow.js", "icons/icon-app.svg", "icons/icon_mictlan.png",
+)
 OPTIONAL_APP_ENTRIES = [
     ".env",
     "documents",
-    "package.json",
     "README.md",
     "scripts",
     "source",
@@ -447,7 +473,7 @@ def resolve_python312_command() -> str | None:
         if not candidate:
             continue
         version = python_version_tuple(candidate)
-        if version and version >= (3, 12):
+        if version == (3, 12):
             return str(candidate)
     return None
 
@@ -508,7 +534,7 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
     existing_python = next((candidate for candidate in iter_runtime_python_candidates(venv_dir) if candidate.exists()), None)
     if existing_python is not None:
         version = python_version_tuple(existing_python)
-        if version and version >= (3, 12):
+        if version == (3, 12):
             venv_python = existing_python
             console_log(f"[installer] Reusing existing FeatureHero runtime at {venv_dir}")
         else:
@@ -548,6 +574,8 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
         check=True,
         env=cleaned_python_env(),
     )
+    if python_version_tuple(venv_python) != (3, 12):
+        raise RuntimeError("The application runtime must use Python 3.12.")
     missing_modules = get_missing_python_modules(venv_python, FEATUREHERO_RUNTIME_MODULES)
     if missing_modules:
         raise ModuleNotFoundError(
@@ -558,7 +586,35 @@ def bootstrap_featurehero_runtime(app_dir: Path, *, required: bool, allow_create
         "[installer] FeatureHero runtime validated with required modules: "
         + ", ".join(FEATUREHERO_RUNTIME_MODULES)
     )
+    validate_installed_app_imports(app_dir, venv_python)
     return f"FeatureHero runtime prepared at {venv_dir}."
+
+
+def validate_installed_app_imports(app_dir: Path, python_exec: Path | str) -> None:
+    """Import actual entry points using the installed environment before launch."""
+    probe = (
+        "import importlib, sys; "
+        "assert sys.version_info[:2] == (3, 12), 'Python 3.12 is required'; "
+        f"[importlib.import_module(name) for name in {(FEATUREHERO_RUNTIME_MODULES + APP_IMPORT_CHECK_MODULES)!r}]"
+    )
+    env = cleaned_python_env()
+    if platform.system() == "Darwin":
+        library_dirs = (app_dir / "runtime-libs", app_dir / "runtime-libs" / "lib")
+        for directory in library_dirs:
+            if (directory / "libomp.dylib").is_file():
+                for variable in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"):
+                    env[variable] = str(directory) + (os.pathsep + env[variable] if env.get(variable) else "")
+                break
+    try:
+        subprocess.run(
+            [str(python_exec), "-c", probe], cwd=str(app_dir),
+            check=True, capture_output=True, text=True,
+            env=env, timeout=120,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        details = getattr(exc, "stderr", "") or getattr(exc, "stdout", "") or str(exc)
+        raise RuntimeError(f"The installed application failed its import check:\n{details}") from exc
+    console_log("[installer] Installed application imports validated successfully")
 
 
 def windows_targets() -> list[Path]:
@@ -844,7 +900,18 @@ def stage_bundled_runtime(app_dir: Path, platform_name: str) -> str:
     return f"Bundled runtime copied from {bundled_runtime_dir}."
 
 
+def validate_required_app_entries(app_dir: Path) -> None:
+    missing = [entry for entry in REQUIRED_APP_ENTRIES if not (app_dir / entry).exists()]
+    missing.extend(entry for entry in REQUIRED_APP_FILES if not (app_dir / entry).is_file())
+    if missing:
+        raise FileNotFoundError(
+            f"Missing required app entries for installer snapshot in {app_dir}: "
+            + ", ".join(missing)
+        )
+
+
 def stage_application_snapshot() -> tuple[Path, list[str]]:
+    validate_required_app_entries(APP_DIR)
     install_root = resolve_install_root()
     console_log(f"[installer] Installing snapshot into {install_root}")
     app_install_dir = resolve_installed_app_dir()
@@ -919,7 +986,7 @@ def install_windows() -> str:
     console_log(f"[installer] Using bundled Python: {bundled_python}")
     runtime_bootstrap_message = bootstrap_featurehero_runtime(
         resolve_installed_app_dir(),
-        required=False,
+        required=True,
         python_exec=bundled_python,
     )
     console_log(f"[installer] {runtime_bootstrap_message}")
@@ -999,7 +1066,7 @@ def install_linux() -> str:
         raise FileNotFoundError("Bundled Python 3.12 was not found for Linux installation.")
     runtime_bootstrap_message = bootstrap_featurehero_runtime(
         resolve_installed_app_dir(),
-        required=False,
+        required=True,
         python_exec=bundled_python,
     )
     runtime_message = f"{runtime_copy_message} {runtime_bootstrap_message}".strip()

@@ -110,6 +110,8 @@ def wait_for_server(url: str, timeout_seconds: float = 12.0) -> None:
 
 def build_runtime_env() -> dict[str, str]:
     env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
     if sys.platform != "darwin":
         return env
 
@@ -133,6 +135,12 @@ def resolve_python_command() -> str:
     env_python = str(os.environ.get("PYTHON3", "")).strip()
     if env_python:
         return env_python
+    # pip installs app dependencies into this environment, not the base runtime.
+    featurehero_runtime = APP_DIR / "resources" / "featurehero" / ".venv"
+    for relative in ("Scripts/python.exe", "Scripts/python3.exe", "bin/python", "bin/python3"):
+        candidate = featurehero_runtime / relative
+        if candidate.is_file():
+            return str(candidate)
     bundled_python = resolve_bundled_python_command()
     if bundled_python:
         return bundled_python
