@@ -21,6 +21,8 @@ La instalación importa los puntos de entrada del servidor, preprocesamiento, en
 - Lanzadores y metadatos: `installers` y `package.json`.
 - Modelo entrenado: se conserva la regla existente de empaquetar el modelo más reciente cuando está disponible, sin incorporar las corridas temporales.
 
+Los generadores del ZIP universal, los paquetes por plataforma y los paquetes nativos de Windows/Linux/macOS utilizan la misma función de escritura y validación. Antes de publicar el ZIP, comprueban que los archivos obligatorios estén presentes y que sus bytes coincidan con el código fuente actual. Un archivo faltante, filtrado por error o desactualizado impide publicar el paquete. La escritura usa un archivo temporal y conserva el ZIP anterior si la validación falla.
+
 `REQUIRED_APP_ENTRIES` y `REQUIRED_APP_FILES`, en `installers/desktop_installer.py`, definen la validación. Si falta un archivo obligatorio, se rechaza el paquete antes de modificar una instalación anterior. `.env` continúa siendo opcional en la copia; la compilación de CI lo obtiene de los secretos configurados.
 
 ## Servicios externos
