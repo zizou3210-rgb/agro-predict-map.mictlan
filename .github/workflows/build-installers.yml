@@ -36,6 +36,7 @@ on:
       - 'package.json'
       - 'tests/test_installer_packaging.py'
       - 'tests/test_ce_script_entrypoints.py'
+      - 'tests/test_featurehero_training.py'
       - '.gitignore'
 
 permissions:
@@ -168,6 +169,7 @@ jobs:
           python -m pip install ./resources/featurehero
           python -c "import os, sys, unittest; os.environ['APP_INSTALLER_TEST_PYTHON'] = sys.executable; suite = unittest.defaultTestLoader.discover('tests', pattern='test_installer_packaging.py'); result = unittest.TextTestRunner(verbosity=2).run(suite); sys.exit(0 if result.wasSuccessful() else 1)"
           python -m unittest discover -s tests -p test_ce_script_entrypoints.py -v
+          python -m unittest discover -s tests -p test_featurehero_training.py -v
 
   assemble-installers:
     name: Assemble native installer packages

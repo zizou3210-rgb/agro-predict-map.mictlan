@@ -36,3 +36,5 @@ python3 -m unittest discover -s tests -p test_installer_packaging.py -v
 ```
 
 Para incluir la prueba real de imports de una copia completa empaquetada, configurar `APP_INSTALLER_TEST_PYTHON` con la ruta de un Python 3.12 que tenga instalado FeatureHero y sus dependencias. CI ejecuta esa prueba en sus tres plataformas después de archivar el intérprete base, evitando incorporar al archivo de runtime las dependencias instaladas solamente para las pruebas.
+
+La validación de CI incluye un entrenamiento XGBoost pequeño en segundo plano y comprueba que se produzcan el modelo, las variables seleccionadas y la tabla de entrenamiento. También verifica que un entrenamiento fallido muestre su excepción original y que un fallo de gráficas no impida guardar un modelo válido. La salida estándar y los errores del proceso se conservan en el log de FeatureHero y el error de CE incorpora su contenido cuando faltan artefactos.
