@@ -77,14 +77,12 @@ def get_featurehero_params_json() -> str:
 def is_pid_running(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name == "nt":
-        return psutil.pid_exists(pid)
     try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
         return False
-    except PermissionError:
+    except psutil.AccessDenied:
         return True
 
 
@@ -207,11 +205,12 @@ def read_model_feature_names(best_model_file: Path) -> list[str]:
     featurehero_python = get_featurehero_python()
     featurehero_repo = get_featurehero_repo()
     env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = (
         str(featurehero_repo)
         if not existing_pythonpath
-        else f"{featurehero_repo}:{existing_pythonpath}"
+        else f"{featurehero_repo}{os.pathsep}{existing_pythonpath}"
     )
     command = [
         str(featurehero_python),
@@ -234,7 +233,7 @@ def read_model_feature_names(best_model_file: Path) -> list[str]:
         cwd=str(ROOT_DIR),
         env=env,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         return []
@@ -356,6 +355,38 @@ def copy_if_exists(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def validate_featurehero_artifacts(workspace_dir: Path, job_info: dict[str, str]) -> None:
+    required = ("best_model_sort_original.pkl", "best_features_sort_original.pkl", "sort_original.csv")
+    missing = [name for name in required if not (workspace_dir / name).is_file()
+        or (workspace_dir / name).stat().st_size == 0]
+    if not missing:
+        return
+    details = ["FeatureHero training did not complete successfully.",
+        "Missing or empty artifacts: " + ", ".join(missing), f"Workspace: {workspace_dir}"]
+    cause = "No diagnostic error was recorded by the training process."
+    log_value = str(job_info.get("log_file", "")).strip()
+    if log_value:
+        log_file = Path(log_value).expanduser()
+        details.append(f"Training log: {log_file}")
+        try:
+            with log_file.open("rb") as handle:
+                handle.seek(max(0, log_file.stat().st_size - 16000))
+                tail = handle.read().decode("utf-8", errors="replace").strip()
+            if tail:
+                details.append("FeatureHero log:\n" + tail)
+                errors = [line.split("[ERROR]", 1)[1].strip() for line in tail.splitlines() if "[ERROR]" in line]
+                if not errors:
+                    errors = [line.strip() for line in tail.splitlines()
+                        if re.match(r"^[\w.]*(?:Error|Exception):", line.strip())
+                        and "FeatureHero training failed; see" not in line]
+                if errors:
+                    cause = errors[-1][:1800]
+        except OSError:
+            details.append("The training log could not be read.")
+    details.append(f"Cause: {cause}" + (f" Training log: {log_value}" if log_value else ""))
+    raise RuntimeError("\n\n".join(details))
+
+
 def persist_model_artifacts(
     model_id: str,
     target_dir: Path,
@@ -365,6 +396,7 @@ def persist_model_artifacts(
     job_info: dict[str, str],
     source_phase5_csv: Path,
 ) -> PhaseAnalysisOutputs:
+    validate_featurehero_artifacts(workspace_dir, job_info)
     model_dir = get_model_dir(model_id)
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -452,12 +484,13 @@ def launch_featurehero(
     before_workspace_dirs = snapshot_workspace_dirs(workspace_root)
 
     env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
     existing_pythonpath = env.get("PYTHONPATH", "")
     featurehero_pythonpath = str(featurehero_repo)
     env["PYTHONPATH"] = (
         featurehero_pythonpath
         if not existing_pythonpath
-        else f"{featurehero_pythonpath}:{existing_pythonpath}"
+        else f"{featurehero_pythonpath}{os.pathsep}{existing_pythonpath}"
     )
     env.update(get_macos_runtime_env())
 
@@ -481,7 +514,7 @@ def launch_featurehero(
             cwd=str(featurehero_repo),
             env=env,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
     except subprocess.CalledProcessError as exc:
         stdout_text = (exc.stdout or "").strip()
@@ -553,7 +586,13 @@ def launch_featurehero(
                 else f"Timed out while waiting for FeatureHero job {pid}."
             )
         time.sleep(5.0)
-    workspace_dir = resolve_workspace_dir(target_dir, before_workspace_dirs)
+    try:
+        workspace_dir = resolve_workspace_dir(target_dir, before_workspace_dirs)
+    except FileNotFoundError:
+        # A startup failure may occur before the workspace is created.
+        validate_featurehero_artifacts(workspace_root, job_info)
+        raise
+    validate_featurehero_artifacts(workspace_dir, job_info)
     return pid, job_info, workspace_dir
 
 

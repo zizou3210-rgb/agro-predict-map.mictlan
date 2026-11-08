@@ -36,22 +36,30 @@ def print_progress_from_queue(progress_queue: Queue):
 
 
 def log_progress_from_queue(progress_queue: Queue, log_file: str):
-    """Monitors a queue and logs progress updates to a file."""
-    logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-    )
-    while True:
-        message = progress_queue.get()
-        if message == "DONE":
-            logging.info("Process completed.")
-            break
-        if isinstance(message, str) and message.startswith("[ERROR]"):
-            logging.error(message)
-            break
-        if isinstance(message, int):
-            logging.info("Progress: %d%%", message)
+    """Use the worker's redirected stdout as the single writer to log_file.
+
+    The background launcher already opens log_file and redirects stdout/stderr.
+    Opening it again with FileHandler can overwrite buffered output on Windows.
+    """
+    logger = logging.Logger("featurehero.progress", level=logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+    logger.addHandler(handler)
+    try:
+        while True:
+            message = progress_queue.get()
+            if message == "DONE":
+                logger.info("Process completed.")
+                break
+            if isinstance(message, str) and message.startswith("[ERROR]"):
+                logger.error(message)
+                break
+            if isinstance(message, int):
+                logger.info("Progress: %d%%", message)
+    finally:
+        handler.flush()
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def run_worker(file_path: str, target_column: str, params: dict):
@@ -69,13 +77,17 @@ def run_worker(file_path: str, target_column: str, params: dict):
         daemon=True
     )
     progress_thread.start()
-    genetic_algorithm(
+    succeeded = genetic_algorithm(
         progress_queue=progress_queue,
         selected_column=target_column,
         file_path=new_file_name,
         folder_file=new_folder_path,
         params=params,
     )
+
+    progress_thread.join(timeout=5)
+    if not succeeded:
+        raise RuntimeError("FeatureHero training failed; see the worker traceback above.")
 
 
 def run_transform(file_path: str, transform_type: str, columns: list[str],
@@ -314,13 +326,13 @@ def handle_run_action(args: argparse.Namespace):
             "--log-file", log_file
         ]
 
-        try:
+        with open(log_file, "a", encoding="utf-8") as worker_log:
             # Detach the process from the current terminal.
             # On Windows, DETACHED_PROCESS has been unreliable with some
             # bundled Python runtimes and can raise WinError 87.
             popen_kwargs = {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
+                "stdout": worker_log,
+                "stderr": subprocess.STDOUT,
                 "stdin": subprocess.DEVNULL,
             }
             if os.name == 'nt':  # Windows
@@ -337,9 +349,8 @@ def handle_run_action(args: argparse.Namespace):
                     log_file,
                     status_file,
                 )
-        finally:
-            # Exit the parent process, leaving the child to run
-            sys.exit(0)
+        # The launcher exits successfully only after the process was registered.
+        return
     elif args.run_as_daemon:
         # This is the daemon process, run the worker and log to file
         run_worker_background(
@@ -406,7 +417,7 @@ def run_worker_background(file_path: str, target_column: str, log_file: str,
 
     pid = os.getpid()
     try:
-        genetic_algorithm(
+        succeeded = genetic_algorithm(
             progress_queue=progress_queue,
             selected_column=target_column,
             file_path=new_file_name,
@@ -414,7 +425,12 @@ def run_worker_background(file_path: str, target_column: str, log_file: str,
             params=params,
             status_file=status_file,
         )
+        if not succeeded:
+            raise RuntimeError("FeatureHero training failed; see the worker traceback in this log.")
     finally:
+        # Drain the terminal event so errors are not lost when the daemon exits.
+        progress_queue.put("DONE")
+        log_thread.join()
         # Ensure the job is deregistered when it finishes or fails
         job_manager.deregister_job(pid)
 

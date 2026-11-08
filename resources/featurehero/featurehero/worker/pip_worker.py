@@ -17,7 +17,7 @@ def genetic_algorithm(
         folder_file: str,
         params: dict = None,
         status_file: str | None = None,
-):
+) -> bool:
     """Main worker to search the feature
 
     Args:
@@ -41,9 +41,11 @@ def genetic_algorithm(
             status_file=status_file,
         )
         progress_queue.put("DONE")
+        return True
     except (ValueError, IOError, FileNotFoundError) as e:
         progress_queue.put(f"[ERROR] {e}")
         traceback.print_exc()
+        return False
     except Exception as e:
         # Catch any other unexpected exceptions
         _, _, exc_traceback = sys.exc_info()
@@ -56,3 +58,4 @@ def genetic_algorithm(
         )
         progress_queue.put(f"[ERROR] {error_message}")
         traceback.print_exc()
+        return False

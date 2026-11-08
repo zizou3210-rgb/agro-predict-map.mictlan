@@ -632,17 +632,6 @@ class GeneticAlgorithm:
                 prefix="optimization"
             )
         )
-        create_graph_model_index(
-            file_result=file_save,
-            folder=self._file_machine.file_data.folder_path,
-            prefix="optimization_overlap",
-            limit_rows=int(len(data_frame_metric) * 0.05),
-        )
-        create_graph_model_index(
-            file_result=file_save,
-            folder=self._file_machine.file_data.folder_path,
-            prefix="optimization",
-        )
         model = self._global_population[0].machine
         save_path_model = (
             self._file_machine.storage_file.adding_prefix_name_extension(
@@ -659,3 +648,13 @@ class GeneticAlgorithm:
             )
         )
         joblib.dump(best_features, save_best_features)
+        # Graphs are optional; a graphics/backend failure must not discard a
+        # successfully trained model or prevent inference artifacts being saved.
+        for graph_prefix, limit in (("optimization_overlap", int(len(data_frame_metric) * 0.05)), ("optimization", 0)):
+            try:
+                create_graph_model_index(
+                    file_result=file_save, folder=self._file_machine.file_data.folder_path,
+                    prefix=graph_prefix, limit_rows=limit,
+                )
+            except Exception as exc:
+                print(f"[WARNING] Could not export {graph_prefix} graph: {exc}", flush=True)
