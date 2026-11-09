@@ -1,5 +1,8 @@
 ## Agro Predict Map
 
+Instalación de macOS con doble clic y configuración de firma en Actions:
+[guía de macOS](docs/macos-installation.md).
+
 Repositorio saneado para compartir en GitHub.
 
 Incluye:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from zipfile import ZIP_STORED, ZipFile
+from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 from desktop_installer import (
     OPTIONAL_APP_ENTRIES,
@@ -36,7 +36,14 @@ def write_installer_archive(
                     continue
                 relative = source.relative_to(bundle_dir)
                 if include is None or include(relative):
-                    zipped.write(source, arcname=f"{archive_root}/{relative.as_posix()}")
+                    member = f"{archive_root}/{relative.as_posix()}"
+                    if source.suffix in {".command", ".sh"}:
+                        info = ZipInfo.from_file(source, arcname=member)
+                        info.create_system = 3
+                        info.external_attr = 0o100755 << 16
+                        zipped.writestr(info, source.read_bytes())
+                    else:
+                        zipped.write(source, arcname=member)
             for name, contents in (notes or {}).items():
                 zipped.writestr(f"{archive_root}/{name}", contents)
         with ZipFile(temporary) as zipped:

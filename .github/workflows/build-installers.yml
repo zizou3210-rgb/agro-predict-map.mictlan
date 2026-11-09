@@ -225,6 +225,67 @@ jobs:
       - name: Upload native installer archives
         uses: actions/upload-artifact@v4
         with:
-          name: native-installers
+          name: unsigned-native-installer-inputs
           path: dist/Mictlan-AgriXGBoost-installer-*-native.zip
+          if-no-files-found: error
+
+  finalize-macos:
+    name: Build Finder installer and notarize macOS package
+    needs: assemble-installers
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-native-installer-inputs
+          path: dist/native-final
+
+      - name: Validate macOS packaging
+        run: python -m unittest discover -s tests -p test_macos_installer.py -v
+
+      - name: Build macOS app and optionally notarize
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          archive="dist/native-final/Mictlan-AgriXGBoost-installer-macos-native.zip"
+          if [[ -n "${MACOS_CERTIFICATE_P12_BASE64}${MACOS_CERTIFICATE_PASSWORD}${MACOS_SIGNING_IDENTITY}${APPLE_ID}${APPLE_TEAM_ID}${APPLE_APP_SPECIFIC_PASSWORD}" ]]; then
+            for name in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD MACOS_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+              if [[ -z "${!name}" ]]; then
+                echo "Missing signing secret: $name" >&2
+                exit 1
+              fi
+            done
+            certificate="$RUNNER_TEMP/mictlan-signing.p12"
+            keychain="$RUNNER_TEMP/mictlan-signing.keychain-db"
+            keychain_password="$(openssl rand -base64 32)"
+            echo "::add-mask::$keychain_password"
+            trap 'security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -f "$certificate"' EXIT
+            python -c 'import os, pathlib; import base64; pathlib.Path(os.environ["RUNNER_TEMP"], "mictlan-signing.p12").write_bytes(base64.b64decode(os.environ["MACOS_CERTIFICATE_P12_BASE64"], validate=True))'
+            security create-keychain -p "$keychain_password" "$keychain"
+            security set-keychain-settings -lut 7200 "$keychain"
+            security unlock-keychain -p "$keychain_password" "$keychain"
+            security import "$certificate" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+            xcrun notarytool store-credentials mictlan-notary --keychain "$keychain" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD"
+            python installers/build_macos_app.py --archive "$archive" --output "$archive" --identity "$MACOS_SIGNING_IDENTITY" --profile mictlan-notary --keychain "$keychain"
+          else
+            echo '::warning::Unsigned development installer: configure Apple signing secrets to avoid Gatekeeper verification warnings.'
+            python installers/build_macos_app.py --archive "$archive" --output "$archive"
+          fi
+
+      - name: Upload final native installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-installers
+          path: dist/native-final/Mictlan-AgriXGBoost-installer-*-native.zip
           if-no-files-found: error

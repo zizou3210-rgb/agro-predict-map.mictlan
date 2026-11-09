@@ -1132,7 +1132,7 @@ def install_macos() -> str:
     installed_installers_dir = resolve_installed_installers_dir()
     launch_script = installed_installers_dir / LAUNCHER_SCRIPT_NAME
     installer_script = installed_installers_dir / "desktop_installer.py"
-    python_exec = shutil.which("python3") or "python3"
+    python_exec = macos_python
     launch_command = f'"{python_exec}" "{launch_script}"'
     uninstall_command = f'"{python_exec}" "{installer_script}" --uninstall'
 

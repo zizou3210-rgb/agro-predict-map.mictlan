@@ -178,6 +178,9 @@ class InstallerPackagingTest(unittest.TestCase):
                     for archive in (native_archive, platform_archive):
                         with ZipFile(archive) as zipped:
                             prefix = archive.stem
+                            if platform_name == "macos":
+                                entry = zipped.getinfo(f"{prefix}/Mictlan-AgriXGBoost_Installer.command")
+                                self.assertTrue((entry.external_attr >> 16) & 0o111)
                             for relative in ("tabular_io.py", "ce_pipeline/phase01/phase1.py", "ce_pipeline/phase02/phase02.py"):
                                 self.assertEqual(zipped.read(f"{prefix}/{relative}"), (PROJECT_DIR / relative).read_bytes())
             universal_archive = dist / "universal.zip"
