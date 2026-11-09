@@ -21,6 +21,7 @@ from ce_pipeline.phase04.phase04 import CANONICAL_TARGET_COLUMN
 from ce_pipeline.phase05.phase05 import run_ce_phase05
 from ce_pipeline.prediction.prediction import update_saved_model_prediction_metadata
 from pipeline.phase_analysis import run_phase_analysis
+from pipeline.progress import write_json_atomic
 
 
 @dataclass
@@ -63,8 +64,7 @@ def run_ce_training(
                 "featurehero_percent": normalized_percent,
             },
         }
-        progress_file.parent.mkdir(parents=True, exist_ok=True)
-        progress_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_atomic(progress_file, payload, indent=2)
 
     if CANONICAL_TARGET_COLUMN not in training_df.columns:
         raise KeyError(f"Missing canonical target column in phase04 training input: {CANONICAL_TARGET_COLUMN}")

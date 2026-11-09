@@ -235,7 +235,7 @@ def _write_pipeline_progress_status(run_dir: Path, *, status: str, message: str)
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     })
     with contextlib.suppress(OSError):
-        progress_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_file_atomic(progress_file, payload)
         PIPELINE_PROGRESS_CACHE[str(progress_file.resolve())] = dict(payload)
 
 
@@ -288,6 +288,8 @@ def cleanup_stale_pipeline_run_dirs() -> None:
             for job in PIPELINE_JOBS.values()
             if str(job.get("run_dir", "")).strip()
         }
+    with CE_SUMMARY_JOBS_LOCK:
+        active_run_dirs.update(str(path) for path in _active_ce_summary_run_dirs())
     for run_dir in PIPELINE_RUNS_DIR.iterdir():
         if not run_dir.is_dir():
             continue
@@ -325,6 +327,8 @@ def cleanup_previous_pipeline_run_dirs(*, keep_run_dirs: set[Path] | None = None
             for job in PIPELINE_JOBS.values()
             if str(job.get("run_dir", "")).strip()
         )
+    with CE_SUMMARY_JOBS_LOCK:
+        preserved_run_dirs.update(_active_ce_summary_run_dirs())
     for run_dir in PIPELINE_RUNS_DIR.iterdir():
         if not run_dir.is_dir():
             continue
@@ -332,6 +336,16 @@ def cleanup_previous_pipeline_run_dirs(*, keep_run_dirs: set[Path] | None = None
             continue
         with contextlib.suppress(OSError):
             shutil.rmtree(run_dir)
+
+
+def _active_ce_summary_run_dirs() -> set[Path]:
+    # Call with CE_SUMMARY_JOBS_LOCK held. Training shares the run directory
+    # with its input; another upload must not delete it during downloads.
+    return {
+        Path(job["run_dir"]).resolve()
+        for job in CE_SUMMARY_JOBS.values()
+        if job.get("run_dir") and job.get("thread") is not None and job["thread"].is_alive()
+    }
 
 
 def cleanup_completed_pipeline_run_temporary_artifacts(run_dir: Path) -> None:
@@ -630,14 +644,8 @@ def sanitize_json_payload(value: object) -> object:
 
 
 def write_json_file_atomic(target_path: Path, payload: object) -> None:
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target_path.with_suffix(target_path.suffix + ".tmp")
-    sanitized_payload = sanitize_json_payload(payload)
-    temp_path.write_text(
-        json.dumps(sanitized_payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    temp_path.replace(target_path)
+    from pipeline.progress import write_json_atomic
+    write_json_atomic(target_path, sanitize_json_payload(payload), indent=2, allow_nan=False)
 
 
 def read_json_file_safe(target_path: Path) -> dict[str, object]:
@@ -2679,7 +2687,7 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
             "message": f"Receiving {source_name} and preparing the backend job.",
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
-        progress_file.write_text(json.dumps(initial_progress, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_file_atomic(progress_file, initial_progress)
         process, stdout_handle, stderr_handle = self.launch_pipeline_process(
             run_dir=run_dir,
             source_name=source_name,
@@ -2942,11 +2950,17 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
         reap_finished_pipeline_jobs()
         cleanup_stale_pipeline_run_dirs()
         active_featurehero_jobs = get_active_featurehero_jobs()
+        with CE_SUMMARY_JOBS_LOCK:
+            active_training_jobs = sum(
+                1 for job in CE_SUMMARY_JOBS.values()
+                if job.get("thread") is not None and job["thread"].is_alive()
+            )
         self.send_json(
             {
                 "active_pipeline_jobs": get_active_pipeline_job_count(),
+                "active_training_jobs": active_training_jobs,
                 "active_featurehero_jobs": len(active_featurehero_jobs),
-                "has_active_runtime_jobs": bool(get_active_pipeline_job_count() or active_featurehero_jobs),
+                "has_active_runtime_jobs": bool(get_active_pipeline_job_count() or active_training_jobs or active_featurehero_jobs),
             }
         )
 
@@ -4371,6 +4385,19 @@ class AppRequestHandler(http.server.SimpleHTTPRequestHandler):
                 "message": "Preparing ce_pipeline files.",
             }
         status = str(progress_payload.get("status") or "running")
+        worker = job.get("thread")
+        if status == "running" and (worker is None or not worker.is_alive()):
+            # Re-read after checking the worker: it may have published its final
+            # result between our first read and the liveness check.
+            if progress_file.exists():
+                progress_payload = read_json_file_safe(progress_file)
+            status = str(progress_payload.get("status") or "running")
+            if status == "running":
+                progress_payload = {**progress_payload, "status": "error",
+                    "message": "Model creation was interrupted and no training worker is running. Start model creation again; downloaded climate rasters will be reused.",
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                write_json_file_atomic(progress_file, progress_payload)
+                status = "error"
         response_payload = {
             "job_id": job_id,
             "status": status,

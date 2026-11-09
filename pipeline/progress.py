@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, RLock, Thread
@@ -12,6 +13,30 @@ from typing import Any
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def write_json_atomic(target_path: Path, payload: object, *, indent=None, allow_nan=True) -> None:
+    """Keep snapshots complete and tolerate short Windows reader/AV locks."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target_path.parent, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(payload, temporary, ensure_ascii=False, indent=indent, allow_nan=allow_nan)
+            temporary.write("\n")
+        # Close the temporary handle before replacement, as Windows requires.
+        for attempt in range(12):
+            try:
+                os.replace(temporary_path, target_path)
+                return
+            except OSError as error:
+                if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 11:
+                    raise
+                time.sleep(min(0.01 * 2 ** attempt, 0.25))
+    finally:
+        if temporary_path is not None:
+            with suppress(OSError):
+                temporary_path.unlink(missing_ok=True)
 
 
 class ProgressReporter:
@@ -42,14 +67,7 @@ class ProgressReporter:
     def _write(self, payload: dict[str, Any]) -> None:
         if self.progress_file is None:
             return
-        self.progress_file.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.progress_file.parent, delete=False) as temporary:
-            json.dump(payload, temporary, ensure_ascii=False)
-            temporary_path = Path(temporary.name)
-        try:
-            os.replace(temporary_path, self.progress_file)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+        write_json_atomic(self.progress_file, payload)
 
     def _publish(self):
         self._sequence += 1

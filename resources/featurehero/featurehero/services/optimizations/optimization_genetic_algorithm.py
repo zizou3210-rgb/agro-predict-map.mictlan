@@ -420,15 +420,19 @@ class GeneticAlgorithm:
             parent_1=parent_1,
             parent_2=parent_2,
         )
-        if parent_1.machine.machine_name == parent_2.machine.machine_name:
+        # Offspring must own their estimators. Reusing parent estimators lets
+        # later fits overwrite another individual's trained feature dimensions.
+        machine_1 = copy.deepcopy(parent_1.machine)
+        machine_2 = copy.deepcopy(parent_2.machine)
+        if machine_1.machine_name == machine_2.machine_name:
             crossover_point = random.randint(
-                1, len(parent_1.machine.hyper_parameters) - 1
+                1, len(machine_1.hyper_parameters) - 1
             )
             hyper_parameters_child_1 = {}
             hyper_parameters_child_2 = {}
             index = 0
-            for key_1, value_1 in parent_1.machine.hyper_parameters.items():
-                key_2_value = parent_2.machine.hyper_parameters[key_1]
+            for key_1, value_1 in machine_1.hyper_parameters.items():
+                key_2_value = machine_2.hyper_parameters[key_1]
                 if index >= crossover_point:
                     hyper_parameters_child_1[key_1] = value_1
                     hyper_parameters_child_2[key_1] = key_2_value
@@ -436,13 +440,13 @@ class GeneticAlgorithm:
                     hyper_parameters_child_1[key_1] = key_2_value
                     hyper_parameters_child_2[key_1] = value_1
                 index = index + 1
-            parent_1.machine.set_hyper_parameters(hyper_parameters_child_1)
-            child_1.set_machine(parent_1.machine)
-            parent_2.machine.set_hyper_parameters(hyper_parameters_child_2)
-            child_2.set_machine(parent_2.machine)
+            machine_1.set_hyper_parameters(copy.deepcopy(hyper_parameters_child_1))
+            child_1.set_machine(machine_1)
+            machine_2.set_hyper_parameters(copy.deepcopy(hyper_parameters_child_2))
+            child_2.set_machine(machine_2)
         else:
-            child_1.set_machine(parent_1.machine)
-            child_2.set_machine(parent_2.machine)
+            child_1.set_machine(machine_1)
+            child_2.set_machine(machine_2)
             child_2.machine.force_mutate_hyper_parameters(
                 deep_decimal=self._genetic_parameters.deep_decimal
             )

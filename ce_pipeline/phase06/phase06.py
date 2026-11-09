@@ -26,6 +26,7 @@ from ce_pipeline.phase03.script03 import create_phase03_workbook
 from ce_pipeline.phase04.phase04 import create_phase04_workbook
 from ce_pipeline.phase05.phase05 import run_ce_phase05
 from pipeline.common import dataframe_to_geojson
+from pipeline.progress import write_json_atomic
 
 
 PREDICTED_COLUMN = "Grain Yield predicted"
@@ -57,8 +58,7 @@ def write_progress(
     }
     if details:
         payload["details"] = details
-    progress_file.parent.mkdir(parents=True, exist_ok=True)
-    progress_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(progress_file, payload, indent=2)
 
 
 @dataclass

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +13,56 @@ from server import AppRequestHandler
 
 
 class PipelineStatusTest(unittest.TestCase):
+    def test_cleanup_preserves_live_training_input_for_both_cleanup_paths(self):
+        for cleanup in (server.cleanup_previous_pipeline_run_dirs, server.cleanup_stale_pipeline_run_dirs):
+            with self.subTest(cleanup=cleanup.__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                training = root / "training"
+                training.mkdir()
+                (training / "input.xlsx").write_bytes(b"training input")
+                worker = Mock()
+                worker.is_alive.return_value = True
+                with patch.object(server, "PIPELINE_RUNS_DIR", root), patch.dict(
+                    server.PIPELINE_JOBS, {}, clear=True,
+                ), patch.dict(server.CE_SUMMARY_JOBS, {"training": {"run_dir": training, "thread": worker}}, clear=True), patch.object(
+                    server, "PIPELINE_FAILED_RUN_DIR_RETENTION_SECONDS", -1,
+                ):
+                    cleanup()
+                self.assertEqual((training / "input.xlsx").read_bytes(), b"training input")
+
+    def test_summary_without_live_worker_reports_interruption_and_preserves_counters(self):
+        for alive in (True, False, None):
+            with self.subTest(alive=alive), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                progress = root / "ce_summary_progress.json"
+                progress.write_text(json.dumps({"status": "running", "percent": 16,
+                    "details": {"stage_completed": 158, "stage_total": 1860}}))
+                job = {"run_dir": root, "progress_file": progress, "result_file": root / "result.json"}
+                if alive is not None:
+                    job["thread"] = Mock()
+                    job["thread"].is_alive.return_value = alive
+                handler = object.__new__(AppRequestHandler)
+                handler.load_ce_summary_job = Mock(return_value=job)
+                response, _, _, status = handler.build_ce_summary_response_payload("training")
+                self.assertEqual(status, "running" if alive else "error")
+                self.assertEqual(response["progress"]["details"]["stage_completed"], 158)
+                self.assertEqual(json.loads(progress.read_text())["status"], status)
+
+    def test_runtime_status_includes_live_model_creation(self):
+        handler = object.__new__(AppRequestHandler)
+        handler.send_json = Mock()
+        worker = Mock()
+        worker.is_alive.return_value = True
+        with patch.dict(server.CE_SUMMARY_JOBS, {"training": {"thread": worker}}, clear=True), patch.object(
+            server, "reap_finished_pipeline_jobs",
+        ), patch.object(server, "cleanup_stale_pipeline_run_dirs"), patch.object(
+            server, "get_active_featurehero_jobs", return_value={},
+        ), patch.object(server, "get_active_pipeline_job_count", return_value=0):
+            handler.handle_runtime_status()
+        response = handler.send_json.call_args.args[0]
+        self.assertEqual(response["active_training_jobs"], 1)
+        self.assertTrue(response["has_active_runtime_jobs"])
+
     def test_cancel_all_includes_processes_recovered_after_server_restart(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             server, "terminate_existing_pipeline_processes", return_value=2,
@@ -23,22 +75,58 @@ class PipelineStatusTest(unittest.TestCase):
             cancel.assert_called_once()
             self.assertEqual(handler.send_json.call_args.args[0]["cancelled_pipeline_jobs"], 2)
 
+    def test_tracked_cancellation_on_windows_and_posix(self):
+        for platform in ("nt", "posix"):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
+                run_dir = Path(directory) / "job"
+                process = Mock(pid=99999991)
+                process.poll.return_value = None
+                job = {"process": process, "run_dir": run_dir}
+                platform_os = Mock(wraps=server.os)
+                platform_os.name = platform
+                # Patch only server's os reference; changing os.name globally
+                # would also change pathlib's native path implementation.
+                with patch.object(server, "os", platform_os), patch.dict(
+                    server.PIPELINE_JOBS, {"job": job}, clear=True,
+                ), patch.object(server, "reap_finished_pipeline_jobs"), patch.object(
+                    server.subprocess, "run", return_value=Mock(stdout=""),
+                ) as scan, patch.object(server, "_write_pipeline_progress_status") as mark:
+                    self.assertEqual(server.terminate_existing_pipeline_processes(), 1)
+                    process.terminate.assert_called_once_with()
+                    self.assertEqual(job["final_status"], "cancelled")
+                    mark.assert_called_once_with(run_dir, status="cancelled",
+                        message="The pipeline job was cancelled before starting a new run.")
+                    if platform == "nt":
+                        scan.assert_not_called()
+                    else:
+                        scan.assert_called_once_with(["ps", "-eo", "pid=,args="],
+                            check=False, capture_output=True, text=True)
+
+    @unittest.skipIf(os.name == "nt", "Orphan discovery uses POSIX ps; Windows cancels tracked jobs")
     def test_orphan_cancellation_marks_its_run_and_ignores_non_python_commands(self):
         with tempfile.TemporaryDirectory() as directory:
-            run_dir = Path(directory) / "job"
+            root = Path(directory)
+            alias = root / "alias"
+            alias.symlink_to(root, target_is_directory=True)
             pipeline = str((server.APP_DIR / "pipeline" / "run_pipeline.py").resolve())
-            listing = Mock(stdout=f"99999991 /usr/bin/python {pipeline} --run-dir {run_dir}\n99999992 echo {pipeline}\n")
-            with patch.object(server, "PIPELINE_RUNS_DIR", Path(directory)), patch.dict(
-                server.PIPELINE_JOBS, {}, clear=True,
-            ), patch.object(server, "reap_finished_pipeline_jobs"), patch.object(
-                server.subprocess, "run", return_value=listing,
-            ), patch.object(server, "terminate_pid", return_value=True) as kill, patch.object(
-                server, "_write_pipeline_progress_status",
-            ) as mark:
-                self.assertEqual(server.terminate_existing_pipeline_processes(), 1)
-                kill.assert_called_once_with(99999991)
-                self.assertEqual(mark.call_args.kwargs["status"], "cancelled")
-                self.assertEqual(mark.call_args.args[0], run_dir)
+            # macOS temporary paths may use /var, which resolves to /private/var.
+            # Exercise an alias on every POSIX runner, including Linux.
+            for runs_dir in (root, alias):
+                with self.subTest(runs_dir=runs_dir):
+                    run_dir = runs_dir / "job"
+                    command = shlex.join(["/usr/bin/python", pipeline, "--run-dir", str(run_dir)])
+                    listing = Mock(stdout=f"99999991 {command}\n99999992 echo {shlex.quote(pipeline)}\n")
+                    with patch.object(server, "PIPELINE_RUNS_DIR", runs_dir), patch.dict(
+                        server.PIPELINE_JOBS, {}, clear=True,
+                    ), patch.object(server, "reap_finished_pipeline_jobs"), patch.object(
+                        server.subprocess, "run", return_value=listing,
+                    ), patch.object(server, "terminate_pid", return_value=True) as kill, patch.object(
+                        server, "_write_pipeline_progress_status",
+                    ) as mark:
+                        self.assertEqual(server.terminate_existing_pipeline_processes(), 1)
+                        kill.assert_called_once_with(99999991)
+                        self.assertEqual(mark.call_args.kwargs["status"], "cancelled")
+                        self.assertEqual(mark.call_args.args[0], run_dir.resolve())
 
     def test_cancelled_recovered_job_does_not_try_to_build_completed_result(self):
         handler = object.__new__(AppRequestHandler)

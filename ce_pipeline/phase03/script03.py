@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 import traceback
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -289,6 +289,9 @@ def get_thread_climate_debug_file() -> Path | None:
 
 
 def append_thread_climate_debug_log(event: str, payload: dict[str, object]) -> None:
+    hook = getattr(_THREAD_LOCAL_RASTER_STATE, "prefetch_progress_hook", None)
+    if hook is not None:
+        hook(event, payload)
     append_phase03_debug_log(
         get_thread_climate_debug_file(),
         event,
@@ -973,7 +976,31 @@ def _download_with_retries(url: str, target_path: Path) -> None:
         )
         try:
             with urlopen(request, timeout=ea_pipeline.HTTP_TIMEOUT_SECONDS, context=ssl_context) as response:
-                payload = response.read()
+                # A socket timeout only limits inactivity. A server sending a
+                # trickle of bytes can keep read() blocked indefinitely.
+                deadline = attempt_started_at + 2 * ea_pipeline.HTTP_TIMEOUT_SECONDS
+                payload = bytearray()
+                last_report_at = attempt_started_at
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Climate raster download exceeded its attempt time limit")
+                    # read1 returns after one underlying read, allowing the
+                    # deadline to be checked even during a slow response.
+                    chunk = response.read1(256 * 1024)
+                    now = time.monotonic()
+                    if now >= deadline:
+                        raise TimeoutError("Climate raster download exceeded its attempt time limit")
+                    if not chunk:
+                        break
+                    payload.extend(chunk)
+                    if now - last_report_at >= 1:
+                        append_thread_climate_debug_log("raster_download_progress", {
+                            "attempt": attempt, "download_bytes": len(payload),
+                        })
+                        last_report_at = now
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None and len(payload) != int(content_length):
+                    raise OSError("Incomplete climate raster download")
             append_thread_climate_debug_log(
                 "raster_download_response_received",
                 {
@@ -1753,11 +1780,27 @@ def prefetch_chc_rasters(
     download_resolution_seconds = 0.0
     prepared_raster_paths: dict[tuple[str, str], Path] = {}
 
-    def resolve_task(dataset: str, current_date: date) -> tuple[Path, bool, float, float]:
+    active_tasks = {}
+    active_lock = Lock()
+    last_completion_at = prefetch_started_at
+    last_download_at = None
+    recent_counts = deque([(prefetch_started_at, 0, 0)])
+
+    def set_task_state(dataset, current_date, operation, **details):
+        key = (dataset, current_date.isoformat())
+        with active_lock:
+            previous = active_tasks.get(key, {})
+            active_tasks[key] = {
+                "dataset": dataset, "date": current_date.isoformat(), "operation": operation,
+                "started_at": previous.get("started_at", time.monotonic()), **details,
+            }
+
+    def prepare_task(dataset: str, current_date: date) -> tuple[Path, bool, float, float]:
         resolve_started_at = time.monotonic()
         target_path, downloaded = _resolve_raster_path(dataset, current_date, cache_dir)
         resolve_seconds = max(0.0, time.monotonic() - resolve_started_at)
         validation_seconds = 0.0
+        set_task_state(dataset, current_date, "validating raster")
         validation_started_at = time.monotonic()
         try:
             _validate_chc_raster_file(target_path, dataset=dataset, current_date=current_date)
@@ -1775,6 +1818,7 @@ def prefetch_chc_rasters(
         repair_resolve_started_at = time.monotonic()
         repaired_path, repaired_downloaded = _resolve_raster_path(dataset, current_date, cache_dir)
         resolve_seconds += max(0.0, time.monotonic() - repair_resolve_started_at)
+        set_task_state(dataset, current_date, "validating raster")
         validation_started_at = time.monotonic()
         try:
             _validate_chc_raster_file(repaired_path, dataset=dataset, current_date=current_date)
@@ -1793,65 +1837,131 @@ def prefetch_chc_rasters(
             ) from repair_error
         return repaired_path, downloaded or repaired_downloaded, resolve_seconds, validation_seconds
 
+    def resolve_task(dataset, current_date):
+        def update_operation(event, payload):
+            operations = {
+                "raster_download_attempt_started": "downloading raster",
+                "raster_download_progress": "downloading raster",
+                "raster_download_response_received": "saving raster",
+                "raster_download_attempt_completed": "validating raster",
+                "raster_download_attempt_failed": "download attempt failed",
+                "raster_download_retry_scheduled": "waiting to retry download",
+            }
+            if event in operations:
+                set_task_state(dataset, current_date, operations[event],
+                    attempt=payload.get("attempt"), retry_wait_seconds=payload.get("sleep_seconds"),
+                    download_bytes=payload.get("download_bytes"))
+        previous_hook = getattr(_THREAD_LOCAL_RASTER_STATE, "prefetch_progress_hook", None)
+        _THREAD_LOCAL_RASTER_STATE.prefetch_progress_hook = update_operation
+        set_task_state(dataset, current_date, "resolving cached or remote raster")
+        try:
+            return prepare_task(dataset, current_date)
+        finally:
+            _THREAD_LOCAL_RASTER_STATE.prefetch_progress_hook = previous_hook
+            with active_lock:
+                active_tasks.pop((dataset, current_date.isoformat()), None)
+
     configured_workers = resolve_phase03_worker_limit("prefetch", total_tasks)
     worker_count = max(1, min(max_workers, configured_workers, total_tasks))
+
+    def report_progress(failure=None):
+        now = time.monotonic()
+        elapsed_seconds = max(0.0, now - prefetch_started_at)
+        since_completion = max(0.0, now - last_completion_at)
+        recent_counts.append((now, completed_tasks, downloaded_tasks))
+        while len(recent_counts) > 1 and now - recent_counts[0][0] > 10:
+            recent_counts.popleft()
+        window_seconds = now - recent_counts[0][0]
+        files_per_second = (completed_tasks - recent_counts[0][1]) / window_seconds if window_seconds > 0 else 0.0
+        download_rate = (downloaded_tasks - recent_counts[0][2]) / window_seconds if window_seconds > 0 else 0.0
+        remaining_tasks = total_tasks - completed_tasks
+        # Cache hits cannot predict network time. Suppress estimates while no
+        # recent completions support them, rather than repeating a stale ETA.
+        eta_seconds = (remaining_tasks / download_rate
+            if last_download_at is not None and now - last_download_at < 5 and download_rate > 0 else None)
+        if remaining_tasks == 0:
+            eta_seconds = 0.0
+        if failure is not None:
+            eta_seconds = None
+        with active_lock:
+            active = [dict(task) for task in active_tasks.values()]
+        for task in active:
+            task["elapsed_seconds"] = round(max(0.0, now - task.pop("started_at")), 1)
+        queued = max(0, remaining_tasks - len(active)) if failure is None else 0
+        fraction = completed_tasks / total_tasks
+        overall_percent = round(15 + fraction * 17, 1)
+        message = (
+            f"Preparing CHIRPS/CHIRTS-daily rasters for phase03: {completed_tasks}/{total_tasks} files checked "
+            f"({fraction * 100:.1f}%). Downloads completed: {downloaded_tasks}. Already cached: {completed_tasks - downloaded_tasks}. "
+            f"Recent rate: {files_per_second:.2f} files/s. "
+            + (f"ETA: {round(eta_seconds)}s." if eta_seconds is not None else "ETA: unavailable until recent downloads establish a rate.")
+        )
+        if failure is not None:
+            message += f" Climate raster preparation failed: {failure}. Waiting for active requests to stop."
+        if active:
+            current = max(active, key=lambda task: task["elapsed_seconds"])
+            message += (f" Active: {len(active)}. Queued: {queued}. "
+                f"Current: {current['operation']}, {current['dataset']} {current['date']} "
+                f"({current['elapsed_seconds']:.0f}s).")
+            if current.get("attempt") is not None:
+                message += f" Attempt: {current['attempt']}/{ea_pipeline.MAX_RETRIES}."
+            if current.get("retry_wait_seconds") is not None:
+                message += f" Retry delay: {current['retry_wait_seconds']}s."
+            if current.get("download_bytes") is not None:
+                message += f" Received: {current['download_bytes'] / (1024 * 1024):.1f} MiB."
+        if remaining_tasks:
+            message += f" Last file completed: {since_completion:.0f}s ago." if completed_tasks else " No files have completed yet."
+        details = {
+            "phase": "phase03", "stage_completed": completed_tasks, "stage_total": total_tasks,
+            "stage_unit": "files", "stage_percent": round(fraction * 100, 2),
+            "stage_elapsed_seconds": round(elapsed_seconds, 1), "stage_eta_seconds": eta_seconds,
+            "stage_rate_per_second": round(files_per_second, 3),
+            "climate_prefetch_tasks_completed": completed_tasks, "climate_prefetch_tasks_total": total_tasks,
+            "climate_prefetch_downloaded": downloaded_tasks, "climate_prefetch_cached": completed_tasks - downloaded_tasks,
+            "climate_prefetch_files_per_second": round(files_per_second, 3),
+            "climate_prefetch_download_files_per_second": round(download_rate, 3),
+            "climate_prefetch_eta_seconds": round(eta_seconds, 1) if eta_seconds is not None else None,
+            "climate_prefetch_elapsed_seconds": round(elapsed_seconds, 3),
+            "climate_prefetch_seconds_since_completion": round(since_completion, 1),
+            "climate_prefetch_active_tasks": active, "climate_prefetch_queued_tasks": queued,
+            "climate_prefetch_raster_resolve_seconds": round(raster_resolve_seconds, 3),
+            "climate_prefetch_raster_validation_seconds": round(raster_validation_seconds, 3),
+            "climate_prefetch_download_resolution_seconds": round(download_resolution_seconds, 3),
+            "soil_skipped": skip_soil_enrichment,
+        }
+        publish_phase03_progress(progress_file=progress_file, progress_callback=progress_callback,
+            percent=overall_percent, stage="Preparing climate rasters", message=message, details=details)
+
+    report_progress()
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_map = {executor.submit(resolve_task, dataset, current_date): (dataset, current_date) for dataset, current_date in task_specs}
-        for future in as_completed(future_map):
-            dataset, current_date = future_map[future]
-            target_path, downloaded, task_resolve_seconds, task_validation_seconds = future.result()
-            prepared_raster_paths[(dataset, current_date.isoformat())] = target_path
-            completed_tasks += 1
-            raster_resolve_seconds += task_resolve_seconds
-            raster_validation_seconds += task_validation_seconds
-            if downloaded:
-                downloaded_tasks += 1
-                download_resolution_seconds += task_resolve_seconds
-            overall_fraction = completed_tasks / total_tasks
-            overall_percent = round(15 + (overall_fraction * 17), 1)
-            cached_tasks = completed_tasks - downloaded_tasks
-            elapsed_seconds = max(0.0, time.monotonic() - prefetch_started_at)
-            files_per_second = completed_tasks / elapsed_seconds if elapsed_seconds > 0 else 0.0
-            remaining_tasks = max(total_tasks - completed_tasks, 0)
-            eta_seconds = remaining_tasks / files_per_second if files_per_second > 0 else None
-            message = (
-                f"Preparing CHIRPS/CHIRTS-daily rasters for phase03: {completed_tasks}/{total_tasks} files checked "
-                f"({round(overall_fraction * 100)}%). Downloaded now: {downloaded_tasks}. Already cached: {cached_tasks}. "
-                f"Rate: {files_per_second:.2f} files/s. "
-                f"ETA: {round(eta_seconds)}s."
-                if eta_seconds is not None
-                else f"Preparing CHIRPS/CHIRTS-daily rasters for phase03: {completed_tasks}/{total_tasks} files checked "
-                f"({round(overall_fraction * 100)}%). Downloaded now: {downloaded_tasks}. Already cached: {cached_tasks}. "
-                f"Rate: {files_per_second:.2f} files/s."
-            )
-            progress_details = {
-                "phase": "phase03",
-                "climate_prefetch_tasks_completed": completed_tasks,
-                "climate_prefetch_tasks_total": total_tasks,
-                "climate_prefetch_downloaded": downloaded_tasks,
-                "climate_prefetch_cached": cached_tasks,
-                "climate_prefetch_files_per_second": round(files_per_second, 3),
-                "climate_prefetch_eta_seconds": round(eta_seconds, 1) if eta_seconds is not None else None,
-                "climate_prefetch_elapsed_seconds": round(elapsed_seconds, 3),
-                "climate_prefetch_raster_resolve_seconds": round(raster_resolve_seconds, 3),
-                "climate_prefetch_raster_validation_seconds": round(raster_validation_seconds, 3),
-                "climate_prefetch_download_resolution_seconds": round(download_resolution_seconds, 3),
-                "soil_skipped": skip_soil_enrichment,
-            }
-            write_progress(
-                progress_file,
-                percent=overall_percent,
-                stage="Preparing climate rasters",
-                message=message,
-                details=progress_details,
-            )
-            if progress_callback:
-                progress_callback(
-                    overall_percent,
-                    "Preparing climate rasters",
-                    message,
-                    progress_details,
-                )
+        pending = set(future_map)
+        try:
+            while pending:
+                completed, pending = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    dataset, current_date = future_map[future]
+                    target_path, downloaded, task_resolve_seconds, task_validation_seconds = future.result()
+                    prepared_raster_paths[(dataset, current_date.isoformat())] = target_path
+                    completed_tasks += 1
+                    raster_resolve_seconds += task_resolve_seconds
+                    raster_validation_seconds += task_validation_seconds
+                    if downloaded:
+                        downloaded_tasks += 1
+                        last_download_at = time.monotonic()
+                        download_resolution_seconds += task_resolve_seconds
+                    last_completion_at = time.monotonic()
+                report_progress()
+        except Exception as error:
+            # Do not drain thousands of queued downloads after the first error.
+            for future in pending:
+                future.cancel()
+            report_progress(failure=error)
+            running = {future for future in pending if not future.done()}
+            while running:
+                _, running = wait(running, timeout=1, return_when=FIRST_COMPLETED)
+                report_progress(failure=error)
+            raise
 
     return {
         "task_total": total_tasks,
@@ -3175,17 +3285,10 @@ def write_progress(
     }
     if details:
         payload["details"] = details
-    progress_file.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=progress_file.parent, delete=False) as temporary:
-        temporary.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-        temporary_path = Path(temporary.name)
-    try:
-        os.replace(temporary_path, progress_file)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    write_json_atomic(progress_file, payload, indent=2)
 
 
-from pipeline.progress import work_progress, reported_operation
+from pipeline.progress import work_progress, reported_operation, write_json_atomic
 
 
 def publish_phase03_progress(progress_file, progress_callback, percent, stage, message, details=None):
